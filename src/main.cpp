@@ -323,6 +323,7 @@ struct Options
     int affinity = 0;        // [Advanced] Affinity: 0 off, 1 WDA_MONITOR, 2 WDA_EXCLUDEFROMCAPTURE (forces DWM composition)
     double paceK = 1.0;      // [Advanced] PaceK: host frames are PaceK / refresh apart with VSync + Arthur (default 1 = base rate equals the refresh rate; 0 = measured from the FG multiplier)
     int startDelayMs = 1500; // [Advanced] StartDelayMs: pause before the swap chain is created
+    int testMode = 0; // [Advanced] TestMode: 1 = capture only (nothing is shown), 2 = show without copying new frames (diagnostics)
     bool probe = false; // [Advanced] Probe=1: compare small patches of every frame (diagnostic, costs a little GPU time)
     double presentDelayMs = 0.0; // [Advanced] PresentDelayMs: hold each frame this long before Present (keeps it off the DWM compose boundary)
     int gpu = -1;            // --gpu <index>: DXGI adapter index (default: high-performance adapter)
@@ -1018,7 +1019,8 @@ bool Host::PresentFrame(ID3D11Texture2D* src)
         ctx11_->Begin(q->dj.Get());
         ctx11_->End(q->a.Get());
     }
-    ctx11_->CopySubresourceRegion(shared11_.Get(), 0, 0, 0, 0, src, 0, &box);
+    if (opt_.testMode != 2)
+        ctx11_->CopySubresourceRegion(shared11_.Get(), 0, 0, 0, 0, src, 0, &box);
     if (q)
     {
         ctx11_->End(q->b.Get());
@@ -1608,6 +1610,9 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
     opt_.probe = GetPrivateProfileIntW(L"Advanced", L"Probe", 0, oc::SettingsPath().c_str()) != 0;
     if (opt_.probe)
         Log("Probe on (picture change check)");
+    opt_.testMode = std::clamp<int>(static_cast<int>(GetPrivateProfileIntW(L"Advanced", L"TestMode", 0, oc::SettingsPath().c_str())), 0, 2);
+    if (opt_.testMode)
+        Log("TEST MODE %d (diagnostics only: %s)", opt_.testMode, opt_.testMode == 1 ? "frames are captured but nothing is shown" : "the picture is shown but new frames are not copied");
 
     {
         DEVMODEW dm{};
@@ -2078,7 +2083,16 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
             presGaps_.push_back(std::chrono::duration<double, std::milli>(t0 - presLast_).count());
         presLast_ = t0;
         paceLast_ = t0;
-        if (!PresentFrame(tex.Get()))
+        if (opt_.testMode == 1)
+        {
+            static bool hidden = false;
+            if (!hidden)
+            {
+                ShowWindow(overlay_, SW_HIDE);
+                hidden = true;
+            }
+        }
+        else if (!PresentFrame(tex.Get()))
             break;
         ++frames;
         ++liveFrames_;
