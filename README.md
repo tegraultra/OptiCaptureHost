@@ -1,0 +1,46 @@
+# OptiCaptureHost
+
+Capture any game window (Windows Graphics Capture) and show it in an overlay that
+[OptiScaler](https://github.com/optiscaler/OptiScaler) can attach to, so FSR 4 and XeSS multi frame generation work on
+**any** game without hooking or modifying it.
+
+by **MK-JH** - Telegram: https://t.me/MKJH_APPS
+
+## Files
+
+- `OptiCaptureLauncher.exe` - the menu: pick the game, VSync on/off, change shortcuts, Start/Stop.
+- `OptiCaptureHost.exe` - the capture host (started by the launcher).
+- `OptiCaptureHost.ini` - created by the launcher; the host re-reads it while running.
+
+## Setup
+
+1. Put both exes in one folder together with your OptiScaler files: OptiScaler renamed to **`dxgi.dll`** (keep that name),
+   `OptiScaler.ini`, the FSR 4 INT8 DLL, `libxess_fg.dll`, `libxell.dll`, `XeFGUnlock.asi` (`LoadAsiPlugins=true`).
+2. Run the game in **Borderless / Windowed** (not Exclusive Fullscreen).
+3. Run `OptiCaptureLauncher.exe`, click the game, press **START**.
+
+## Shortcuts (defaults, all changeable in the launcher)
+
+| Action | Default |
+|---|---|
+| Stop capture | Ctrl+Shift+F12 |
+| Game / menu focus | Ctrl+Shift+F11 |
+| OptiScaler menu | Ctrl+Shift+F10 |
+| Show the launcher | Ctrl+Shift+F9 |
+
+"OptiScaler menu key" must match `ShortcutKey` in `OptiScaler.ini` (Insert by default).
+
+## VSync
+
+Switch it in the launcher at any time. For real tearing (lowest latency) start the capture with VSync **off**; the
+tearing capability is chosen when the capture starts. Your monitor refresh rate caps the output frame rate.
+
+## Build
+
+Push to GitHub: the Actions workflow builds both exes and publishes `OptiCaptureHost-win64.zip` under Releases
+(`build-latest`). Local: `cmake -S . -B build -A x64` then `cmake --build build --config Release`.
+
+## Notes
+
+FSR 4 here runs 1:1 (no jitter): anti-aliasing / shimmer reduction, not resolution upscaling. Latency: one capture hop.
+OptiScaler, XeSS and FSR keep their own licences and are not included.
