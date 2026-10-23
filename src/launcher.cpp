@@ -49,7 +49,7 @@ constexpr const wchar_t* kTelegramText = L"t.me/MKJH_APPS";
 constexpr const wchar_t* kHostExe = L"OptiCaptureHost.exe";
 constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host's overlay window class
 
-constexpr const wchar_t* kVersion = L"2.4.0";
+constexpr const wchar_t* kVersion = L"2.5.0";
 
 constexpr float kW = 796.0f; // client size in logical pixels (scaled by the DPI)
 constexpr float kH = 564.0f;
@@ -808,11 +808,12 @@ class App
         // Arthur: both "On" modes leave OptiScaler on auto and let the host pace its frames instead.
         // Classic (2.2.0) mode: VSync is only the host's own setting and OptiScaler is left on auto for every FG.
         const bool classic = st_.presentMode == 3;
+        const bool ls = st_.presentMode == 4; // Lossless-style: tearing unless VSync is explicitly On, host-side only
         const bool on = vsyncMode_ == 1 || vsyncMode_ == 2;
-        const bool hostOnly = on && (classic || st_.frameGenMode == 1);
+        const bool hostOnly = on && (classic || ls || st_.frameGenMode == 1);
         const int eff = (classic || hostOnly) ? -1 : vsyncMode_;
         // Classic = 2.2.0: the host's own VSync toggle, on by default (Auto and both On modes), off only for Off.
-        st_.vsync = classic ? vsyncMode_ != 0 : (vsyncMode_ == 1 || hostOnly); // host-side VSync (pacing / classic Present)
+        st_.vsync = classic ? vsyncMode_ != 0 : (ls ? on : (vsyncMode_ == 1 || hostOnly)); // host-side VSync (pacing / classic Present)
         Save();
         WritePrivateProfileStringW(L"General", L"VSyncMode", vsyncMode_ < 0 ? L"auto" : (vsyncMode_ == 2 ? L"on0" : (vsyncMode_ == 1 ? L"on1" : L"off")),
                                    oc::SettingsPath().c_str());
@@ -868,7 +869,9 @@ bool App::Create(HINSTANCE inst)
         else if (_wcsicmp(vm, L"off") == 0) vsyncMode_ = 0;
         else if (_wcsicmp(vm, L"auto") == 0) vsyncMode_ = -1;
         else vsyncMode_ = ReadForceVsync();
-        st_.vsync = (st_.presentMode == 3) ? vsyncMode_ != 0 : (vsyncMode_ == 1 || (vsyncMode_ == 2 && st_.frameGenMode == 1));
+        st_.vsync = (st_.presentMode == 3) ? vsyncMode_ != 0
+                    : (st_.presentMode == 4) ? (vsyncMode_ == 1 || vsyncMode_ == 2)
+                                             : (vsyncMode_ == 1 || (vsyncMode_ == 2 && st_.frameGenMode == 1));
     }
 
     WNDCLASSEXW wc{};
@@ -1770,18 +1773,18 @@ void App::OnClick(int id)
     {
         static const wchar_t* names[] = {
             L"Auto  (FG on: no wait, FG off: VSync)", L"Always no wait  (interval 0)", L"Always wait for vblank  (interval 1)",
-            L"Classic  (behaves like version 2.2.0)"
+            L"Classic  (behaves like version 2.2.0)", L"Lossless-style  (low latency, tearing allowed)"
         };
         HMENU menu = CreatePopupMenu();
         if (menu)
         {
-            for (int v = 0; v <= 3; ++v)
+            for (int v = 0; v <= 4; ++v)
                 AppendMenuW(menu, MF_STRING | (st_.presentMode == v ? MF_CHECKED : 0), kPresentMenuBase + v, names[v]);
             POINT pt{};
             GetCursorPos(&pt);
             const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
             DestroyMenu(menu);
-            if (cmd >= kPresentMenuBase && cmd <= kPresentMenuBase + 3)
+            if (cmd >= kPresentMenuBase && cmd <= kPresentMenuBase + 4)
             {
                 st_.presentMode = static_cast<int>(cmd - kPresentMenuBase);
                 Save();
@@ -2308,7 +2311,7 @@ void App::Paint(HDC dc, int W, int H)
 
     // ---- present mode selector ----
     {
-        static const wchar_t* presentNames[] = { L"Auto  (recommended)", L"Always no wait  (interval 0)", L"Always wait for vblank  (interval 1)", L"Classic  (like 2.2.0)" };
+        static const wchar_t* presentNames[] = { L"Auto  (recommended)", L"Always no wait  (interval 0)", L"Always wait for vblank  (interval 1)", L"Classic  (like 2.2.0)", L"Lossless-style  (low latency)" };
 
         Text(g, L"Present mode", *f_.bodyB, R(44, 512, 130, 24), col::Text());
 
@@ -2316,7 +2319,7 @@ void App::Paint(HDC dc, int W, int H)
         const bool hot = hover_ == kIdPresentSelect;
         FillRound(g, selector, S(8), hot ? col::RowHot() : col::Row());
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
-        Text(g, presentNames[(st_.presentMode >= 0 && st_.presentMode <= 3) ? st_.presentMode : 0], *f_.chip, R(186, 514, 308, 22), col::Text());
+        Text(g, presentNames[(st_.presentMode >= 0 && st_.presentMode <= 4) ? st_.presentMode : 0], *f_.chip, R(186, 514, 308, 22), col::Text());
         AddHit(selector, kIdPresentSelect);
     }
 
