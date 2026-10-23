@@ -49,6 +49,7 @@
 #include <cwchar>
 #include <cwctype>
 #include <fstream>
+#include <mutex>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -532,6 +533,16 @@ class Host
     bool liveDxgiValid_ = false;
     int lastInterval_ = 0;
     std::vector<double> capHist_; // the last capture rates, to tell a capped game from a slow one
+
+    // Frame time diagnostics, logged every 5 s: gaps between captured frames and between the host's presents, and the
+    // longest time the housekeeping (focus spoof scan, window checks) kept the presenting thread busy.
+    std::mutex arrMutex_;
+    std::vector<double> arrGaps_;
+    std::chrono::steady_clock::time_point arrLast_{};
+    std::vector<double> presGaps_;
+    std::chrono::steady_clock::time_point presLast_{};
+    double houseMaxMs_ = 0.0;
+    double spoofMaxMs_ = 0.0;
     ComPtr<ID3D12GraphicsCommandList> list_;
     ComPtr<ID3D12Fence> frameFence_;
     UINT64 frameFenceValue_ = 0;
@@ -685,6 +696,13 @@ bool Host::InitCapture()
 
     pool_ = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(winrtDevice_, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
     pool_.FrameArrived([this](auto&&, auto&&) {
+        const auto tn = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lk(arrMutex_);
+            if (arrLast_.time_since_epoch().count() != 0 && arrGaps_.size() < 4096)
+                arrGaps_.push_back(std::chrono::duration<double, std::milli>(tn - arrLast_).count());
+            arrLast_ = tn;
+        }
         arrivals_.fetch_add(1, std::memory_order_relaxed);
         SetEvent(frameEvent_);
     });
@@ -1592,10 +1610,12 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
         if (now - lastHousekeeping > std::chrono::milliseconds(250))
         {
             lastHousekeeping = now;
+            const auto hk0 = std::chrono::steady_clock::now();
             if (focusSpoof_ && now - spoofScanAt_ > std::chrono::seconds(1))
             {
                 spoofScanAt_ = now; // OptiScaler loads the frame generation DLLs a little later
                 PatchNewModules(spoofSeen_);
+                spoofMaxMs_ = (std::max)(spoofMaxMs_, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - hk0).count());
             }
             if (parentProc_ && WaitForSingleObject(parentProc_, 0) == WAIT_OBJECT_0)
             {
@@ -1606,6 +1626,7 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
             if (!RefreshGeometry())
                 break;
             MoveOverlay();
+            houseMaxMs_ = (std::max)(houseMaxMs_, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - hk0).count());
         }
         if (now - liveAt_ >= std::chrono::seconds(1))
             PublishLive(now);
@@ -1618,6 +1639,44 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
                 Log("  per frame: fence wait %.2f ms, inside Present %.2f ms", waitMs_ / frames, presentMs_ / frames);
             waitMs_ = 0.0;
             presentMs_ = 0.0;
+
+            // Frame times: averages hide stutter, so show the spread (99th percentile, longest gap, how many gaps were
+            // more than 1.5 times the average).
+            {
+                std::vector<double> ag;
+                {
+                    std::lock_guard<std::mutex> lk(arrMutex_);
+                    ag.swap(arrGaps_);
+                }
+                auto describe = [](std::vector<double>& v, double& avg, double& p99, double& mx, int& slow)
+                {
+                    avg = p99 = mx = 0.0;
+                    slow = 0;
+                    if (v.empty())
+                        return false;
+                    double sum = 0.0;
+                    for (double x : v)
+                        sum += x;
+                    avg = sum / static_cast<double>(v.size());
+                    for (double x : v)
+                        if (x > avg * 1.5)
+                            ++slow;
+                    std::sort(v.begin(), v.end());
+                    mx = v.back();
+                    p99 = v[std::min<size_t>(v.size() - 1, static_cast<size_t>(static_cast<double>(v.size()) * 0.99))];
+                    return true;
+                };
+                double a, p, m;
+                int s;
+                if (describe(ag, a, p, m, s))
+                    Log("  capture gaps: avg %.1f ms, 99%% %.1f ms, max %.1f ms, %d of %zu slow", a, p, m, s, ag.size());
+                if (describe(presGaps_, a, p, m, s))
+                    Log("  present gaps: avg %.1f ms, 99%% %.1f ms, max %.1f ms, %d of %zu slow", a, p, m, s, presGaps_.size());
+                Log("  housekeeping: longest %.2f ms (focus spoof scan %.2f ms)", houseMaxMs_, spoofMaxMs_);
+                presGaps_.clear();
+                houseMaxMs_ = 0.0;
+                spoofMaxMs_ = 0.0;
+            }
 
             // What DXGI says it really put on screen: presents that reached the display vs display refreshes.
             DXGI_FRAME_STATISTICS fs{};
@@ -1757,6 +1816,9 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
         }
 
         const auto t0 = std::chrono::steady_clock::now();
+        if (presLast_.time_since_epoch().count() != 0 && presGaps_.size() < 4096)
+            presGaps_.push_back(std::chrono::duration<double, std::milli>(t0 - presLast_).count());
+        presLast_ = t0;
         paceLast_ = t0;
         if (!PresentFrame(tex.Get()))
             break;
