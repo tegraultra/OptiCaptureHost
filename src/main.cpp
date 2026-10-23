@@ -541,6 +541,14 @@ class Host
     std::chrono::steady_clock::time_point arrLast_{};
     std::vector<double> presGaps_;
     std::vector<double> latMs_; // age of the captured frame (Windows composed it) when the host hands it to Present
+    std::vector<double> srcGaps_; // gaps between the capture time stamps Windows put on the frames
+    long long lastSrc100ns_ = 0;
+    ComPtr<ID3D11Texture2D> probe_[2]; // tiny staging copies of 32 screen patches: tells whether the picture really changed
+    bool probeValid_[2] = { false, false };
+    int probeIdx_ = 0;
+    unsigned long long lastHash_ = 0;
+    bool haveHash_ = false;
+    int contentNew_ = 0, contentRep_ = 0, repRun_ = 0, repMax_ = 0;
     std::chrono::steady_clock::time_point presLast_{};
     double houseMaxMs_ = 0.0;
     double spoofMaxMs_ = 0.0;
@@ -1674,8 +1682,16 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
                 if (describe(presGaps_, a, p, m, s))
                     Log("  present gaps: avg %.1f ms, 99%% %.1f ms, max %.1f ms, %d of %zu slow", a, p, m, s, presGaps_.size());
                 if (describe(latMs_, a, p, m, s))
-                    Log("  frame age at Present (capture to host): avg %.1f ms, 99%% %.1f ms, max %.1f ms", a, p, m);
+                    Log("  frame age at Present (negative = frame is for a vblank still ahead): avg %.1f ms, 99%% %.1f ms, max %.1f ms",
+                        a - 500.0, p - 500.0, m - 500.0);
                 latMs_.clear();
+                if (describe(srcGaps_, a, p, m, s))
+                    Log("  frame time stamps from Windows: avg %.1f ms, 99%% %.1f ms, max %.1f ms, %d of %zu slow", a, p, m, s, srcGaps_.size());
+                srcGaps_.clear();
+                if (contentNew_ + contentRep_ > 0)
+                    Log("  picture changed: %d new, %d identical to the one before (longest run %d) of %d", contentNew_, contentRep_,
+                        repMax_, contentNew_ + contentRep_);
+                contentNew_ = contentRep_ = repMax_ = 0;
                 Log("  housekeeping: longest %.2f ms (focus spoof scan %.2f ms)", houseMaxMs_, spoofMaxMs_);
                 presGaps_.clear();
                 houseMaxMs_ = 0.0;
@@ -1819,16 +1835,81 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
             winrt::check_hresult(access->GetInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(tex.GetAddressOf())));
         }
 
-        if (latMs_.size() < 4096)
         {
             LARGE_INTEGER qpc{}, freq{};
             QueryPerformanceCounter(&qpc);
             QueryPerformanceFrequency(&freq);
             const double nowMs = 1000.0 * static_cast<double>(qpc.QuadPart) / static_cast<double>(freq.QuadPart);
-            const double capMs = static_cast<double>(latest.SystemRelativeTime().count()) / 10000.0;
-            const double age = nowMs - capMs;
-            if (age >= 0.0 && age < 2000.0)
-                latMs_.push_back(age);
+            const long long src = latest.SystemRelativeTime().count();
+            const double age = nowMs - static_cast<double>(src) / 10000.0;
+            if (latMs_.size() < 4096 && age > -500.0 && age < 2000.0)
+                latMs_.push_back(age + 500.0); // shifted so negative values survive the statistics; shown shifted back
+            if (lastSrc100ns_ != 0 && srcGaps_.size() < 4096)
+                srcGaps_.push_back(static_cast<double>(src - lastSrc100ns_) / 10000.0);
+            lastSrc100ns_ = src;
+        }
+
+        // Did the picture really change? 32 small patches spread over the screen are copied to a staging texture and
+        // compared with the previous frame (read one frame later, so nothing waits for the GPU).
+        {
+            D3D11_TEXTURE2D_DESC td{};
+            tex->GetDesc(&td);
+            if ((td.Format == DXGI_FORMAT_B8G8R8A8_UNORM || td.Format == DXGI_FORMAT_R8G8B8A8_UNORM) && td.Width >= 256 && td.Height >= 128)
+            {
+                if (!probe_[0])
+                {
+                    D3D11_TEXTURE2D_DESC pd{};
+                    pd.Width = 64;
+                    pd.Height = 32;
+                    pd.MipLevels = 1;
+                    pd.ArraySize = 1;
+                    pd.Format = td.Format;
+                    pd.SampleDesc.Count = 1;
+                    pd.Usage = D3D11_USAGE_STAGING;
+                    pd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                    for (int i = 0; i < 2; ++i)
+                        dev11_->CreateTexture2D(&pd, nullptr, &probe_[i]);
+                }
+                if (probe_[0] && probe_[1])
+                {
+                    const int prev = probeIdx_ ^ 1;
+                    D3D11_MAPPED_SUBRESOURCE m{};
+                    if (probeValid_[prev] && SUCCEEDED(ctx11_->Map(probe_[prev].Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m)))
+                    {
+                        unsigned long long h = 1469598103934665603ULL;
+                        for (UINT y = 0; y < 32; ++y)
+                        {
+                            const unsigned char* row = static_cast<const unsigned char*>(m.pData) + static_cast<size_t>(y) * m.RowPitch;
+                            for (UINT x = 0; x < 256; ++x)
+                                h = (h ^ row[x]) * 1099511628211ULL;
+                        }
+                        ctx11_->Unmap(probe_[prev].Get(), 0);
+                        probeValid_[prev] = false;
+                        if (haveHash_ && h == lastHash_)
+                        {
+                            ++contentRep_;
+                            repMax_ = (std::max)(repMax_, ++repRun_);
+                        }
+                        else
+                        {
+                            ++contentNew_;
+                            repRun_ = 0;
+                        }
+                        lastHash_ = h;
+                        haveHash_ = true;
+                    }
+                    for (UINT gy = 0; gy < 4; ++gy)
+                        for (UINT gx = 0; gx < 8; ++gx)
+                        {
+                            const UINT x = (td.Width - 8) * gx / 7;
+                            const UINT y = (td.Height - 8) * gy / 3;
+                            D3D11_BOX box{ x, y, 0, x + 8, y + 8, 1 };
+                            ctx11_->CopySubresourceRegion(probe_[probeIdx_].Get(), 0, gx * 8, gy * 8, 0, tex.Get(), 0, &box);
+                        }
+                    probeValid_[probeIdx_] = true;
+                    probeIdx_ ^= 1;
+                }
+            }
         }
 
         const auto t0 = std::chrono::steady_clock::now();
