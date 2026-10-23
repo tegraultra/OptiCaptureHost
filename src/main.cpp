@@ -324,6 +324,7 @@ struct Options
     double paceK = 1.0;      // [Advanced] PaceK: host frames are PaceK / refresh apart with VSync + Arthur (default 1 = base rate equals the refresh rate; 0 = measured from the FG multiplier)
     int startDelayMs = 1500; // [Advanced] StartDelayMs: pause before the swap chain is created
     int testMode = 0; // [Advanced] TestMode: 1 = capture only (nothing is shown), 2 = show without copying new frames (diagnostics)
+    bool noLayered = false; // [Advanced] NoLayered=1 (test only): plain overlay window, no layered style, so no click-through
     bool probe = false; // [Advanced] Probe=1: compare small patches of every frame (diagnostic, costs a little GPU time)
     double presentDelayMs = 0.0; // [Advanced] PresentDelayMs: hold each frame this long before Present (keeps it off the DWM compose boundary)
     int gpu = -1;            // --gpu <index>: DXGI adapter index (default: high-performance adapter)
@@ -788,8 +789,8 @@ bool Host::InitOverlayAndSwapChain()
     GetTargetBounds(target_, r);
     lastBounds_ = r;
 
-    DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED;
-    if (opt_.clickThrough)
+    DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (opt_.noLayered ? 0 : WS_EX_LAYERED);
+    if (opt_.clickThrough && !opt_.noLayered)
         ex |= WS_EX_TRANSPARENT;
     interactive_ = !opt_.clickThrough;
 
@@ -800,7 +801,8 @@ bool Host::InitOverlayAndSwapChain()
         Log("CreateWindowEx failed: %lu", GetLastError());
         return false;
     }
-    SetLayeredWindowAttributes(overlay_, 0, static_cast<BYTE>(opt_.overlayAlpha), LWA_ALPHA);
+    if (!opt_.noLayered)
+        SetLayeredWindowAttributes(overlay_, 0, static_cast<BYTE>(opt_.overlayAlpha), LWA_ALPHA);
     if (opt_.affinity == 1 || opt_.affinity == 2)
     {
         const BOOL ok = SetWindowDisplayAffinity(overlay_, opt_.affinity == 1 ? WDA_MONITOR : 0x00000011 /* WDA_EXCLUDEFROMCAPTURE */);
@@ -1309,6 +1311,8 @@ void Host::MoveOverlay()
 // mouse and the focus. Put back what we need, a few times a second.
 void Host::EnforceOverlayStyle()
 {
+    if (opt_.noLayered)
+        return;
     constexpr LONG_PTR mask = WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_APPWINDOW;
     LONG_PTR want = WS_EX_TOOLWINDOW | WS_EX_LAYERED;
     if (!interactive_)
@@ -1610,6 +1614,9 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
     opt_.probe = GetPrivateProfileIntW(L"Advanced", L"Probe", 0, oc::SettingsPath().c_str()) != 0;
     if (opt_.probe)
         Log("Probe on (picture change check)");
+    opt_.noLayered = GetPrivateProfileIntW(L"Advanced", L"NoLayered", 0, oc::SettingsPath().c_str()) != 0;
+    if (opt_.noLayered)
+        Log("NoLayered test: the overlay is a plain window (mouse clicks will not pass through)");
     opt_.testMode = std::clamp<int>(static_cast<int>(GetPrivateProfileIntW(L"Advanced", L"TestMode", 0, oc::SettingsPath().c_str())), 0, 2);
     if (opt_.testMode)
         Log("TEST MODE %d (diagnostics only: %s)", opt_.testMode, opt_.testMode == 1 ? "frames are captured but nothing is shown" : "the picture is shown but new frames are not copied");
