@@ -540,6 +540,7 @@ class Host
     std::vector<double> arrGaps_;
     std::chrono::steady_clock::time_point arrLast_{};
     std::vector<double> presGaps_;
+    std::vector<double> latMs_; // age of the captured frame (Windows composed it) when the host hands it to Present
     std::chrono::steady_clock::time_point presLast_{};
     double houseMaxMs_ = 0.0;
     double spoofMaxMs_ = 0.0;
@@ -1672,6 +1673,9 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
                     Log("  capture gaps: avg %.1f ms, 99%% %.1f ms, max %.1f ms, %d of %zu slow", a, p, m, s, ag.size());
                 if (describe(presGaps_, a, p, m, s))
                     Log("  present gaps: avg %.1f ms, 99%% %.1f ms, max %.1f ms, %d of %zu slow", a, p, m, s, presGaps_.size());
+                if (describe(latMs_, a, p, m, s))
+                    Log("  frame age at Present (capture to host): avg %.1f ms, 99%% %.1f ms, max %.1f ms", a, p, m);
+                latMs_.clear();
                 Log("  housekeeping: longest %.2f ms (focus spoof scan %.2f ms)", houseMaxMs_, spoofMaxMs_);
                 presGaps_.clear();
                 houseMaxMs_ = 0.0;
@@ -1813,6 +1817,18 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
             winrt::com_ptr<DxgiInterfaceAccess> access;
             winrt::check_hresult(winrt::get_unknown(surface)->QueryInterface(__uuidof(DxgiInterfaceAccess), access.put_void()));
             winrt::check_hresult(access->GetInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(tex.GetAddressOf())));
+        }
+
+        if (latMs_.size() < 4096)
+        {
+            LARGE_INTEGER qpc{}, freq{};
+            QueryPerformanceCounter(&qpc);
+            QueryPerformanceFrequency(&freq);
+            const double nowMs = 1000.0 * static_cast<double>(qpc.QuadPart) / static_cast<double>(freq.QuadPart);
+            const double capMs = static_cast<double>(latest.SystemRelativeTime().count()) / 10000.0;
+            const double age = nowMs - capMs;
+            if (age >= 0.0 && age < 2000.0)
+                latMs_.push_back(age);
         }
 
         const auto t0 = std::chrono::steady_clock::now();
