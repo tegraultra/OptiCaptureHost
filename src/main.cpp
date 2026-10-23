@@ -323,6 +323,7 @@ struct Options
     int affinity = 0;        // [Advanced] Affinity: 0 off, 1 WDA_MONITOR, 2 WDA_EXCLUDEFROMCAPTURE (forces DWM composition)
     double paceK = 1.0;      // [Advanced] PaceK: host frames are PaceK / refresh apart with VSync + Arthur (default 1 = base rate equals the refresh rate; 0 = measured from the FG multiplier)
     int startDelayMs = 1500; // [Advanced] StartDelayMs: pause before the swap chain is created
+    double presentDelayMs = 0.0; // [Advanced] PresentDelayMs: hold each frame this long before Present (keeps it off the DWM compose boundary)
     int gpu = -1;            // --gpu <index>: DXGI adapter index (default: high-performance adapter)
     bool clickThrough = true; // --no-clickthrough
     int menuKey = VK_INSERT;  // --menu-key <vk>: the key that opens OptiScaler's menu (e.g. 0x2D, its default, Insert)
@@ -1479,6 +1480,9 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
         opt_.overlayAlpha = 255; // classic / Lossless-style: plain opaque overlay (lets Windows flip it straight to the screen)
     Log("Overlay alpha %d, display affinity %d, PaceK %.2f", opt_.overlayAlpha, opt_.affinity, opt_.paceK);
     opt_.startDelayMs = std::clamp<int>(static_cast<int>(GetPrivateProfileIntW(L"Advanced", L"StartDelayMs", 1500, oc::SettingsPath().c_str())), 0, 10000);
+    opt_.presentDelayMs = std::clamp<double>(static_cast<double>(GetPrivateProfileIntW(L"Advanced", L"PresentDelayMs", 0, oc::SettingsPath().c_str())), 0.0, 14.0);
+    if (opt_.presentDelayMs > 0.0)
+        Log("PresentDelayMs = %.0f", opt_.presentDelayMs);
 
     {
         DEVMODEW dm{};
@@ -1788,6 +1792,7 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
         }
         if (!latest)
             continue;
+        const auto tGot = std::chrono::steady_clock::now();
 
         // Lossless-style mode: let the swap chain's frame queue drain first (latency 1), then take the newest captured
         // frame again, so the picture shown is as fresh as possible. If the wait keeps timing out (the presents are not
@@ -1806,6 +1811,32 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
             else
             {
                 waitTimeouts_ = 0;
+            }
+            for (;;)
+            {
+                auto f = pool_.TryGetNextFrame();
+                if (!f)
+                    break;
+                latest = f;
+            }
+        }
+
+        // Hold the frame until a fixed point inside the refresh cycle, then take the newest one again. The frame arrives
+        // right when Windows starts composing the next screen; presenting at that moment races the composition, so the
+        // frame lands one refresh earlier or later from one frame to the next. A short fixed delay removes the race.
+        if (opt_.presentDelayMs > 0.0)
+        {
+            const auto until = tGot + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                          std::chrono::duration<double, std::milli>(opt_.presentDelayMs));
+            for (;;)
+            {
+                const auto left = until - std::chrono::steady_clock::now();
+                if (left <= std::chrono::steady_clock::duration::zero())
+                    break;
+                if (left > std::chrono::milliseconds(2))
+                    Sleep(1);
+                else
+                    YieldProcessor();
             }
             for (;;)
             {
