@@ -323,6 +323,7 @@ struct Options
     int affinity = 0;        // [Advanced] Affinity: 0 off, 1 WDA_MONITOR, 2 WDA_EXCLUDEFROMCAPTURE (forces DWM composition)
     double paceK = 1.0;      // [Advanced] PaceK: host frames are PaceK / refresh apart with VSync + Arthur (default 1 = base rate equals the refresh rate; 0 = measured from the FG multiplier)
     int startDelayMs = 1500; // [Advanced] StartDelayMs: pause before the swap chain is created
+    bool probe = false; // [Advanced] Probe=1: compare small patches of every frame (diagnostic, costs a little GPU time)
     double presentDelayMs = 0.0; // [Advanced] PresentDelayMs: hold each frame this long before Present (keeps it off the DWM compose boundary)
     int gpu = -1;            // --gpu <index>: DXGI adapter index (default: high-performance adapter)
     bool clickThrough = true; // --no-clickthrough
@@ -550,6 +551,22 @@ class Host
     unsigned long long lastHash_ = 0;
     bool haveHash_ = false;
     int contentNew_ = 0, contentRep_ = 0, repRun_ = 0, repMax_ = 0;
+    // GPU time of the host's own copies (measured with timestamp queries)
+    ComPtr<ID3D12QueryHeap> tsHeap_;
+    ComPtr<ID3D12Resource> tsRead_;
+    UINT64 tsFreq_ = 0;
+    double gpu12Ms_ = 0.0, gpu12Max_ = 0.0;
+    int gpu12N_ = 0;
+    struct Q11
+    {
+        ComPtr<ID3D11Query> dj, a, b;
+        bool pending = false;
+    };
+    Q11 q11_[4];
+    int q11Idx_ = 0;
+    bool q11Failed_ = false;
+    double gpu11Ms_ = 0.0, gpu11Max_ = 0.0;
+    int gpu11N_ = 0;
     std::chrono::steady_clock::time_point presLast_{};
     double houseMaxMs_ = 0.0;
     double spoofMaxMs_ = 0.0;
@@ -854,6 +871,33 @@ bool Host::InitOverlayAndSwapChain()
         return false;
     list_->Close();
 
+    tsHeap_.Reset();
+    tsRead_.Reset();
+    {
+        D3D12_QUERY_HEAP_DESC qh{};
+        qh.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        qh.Count = sd.BufferCount * 2;
+        D3D12_HEAP_PROPERTIES hp{};
+        hp.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = static_cast<UINT64>(sd.BufferCount) * 16;
+        rd.Height = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_UNKNOWN;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (!(SUCCEEDED(dev12_->CreateQueryHeap(&qh, IID_PPV_ARGS(&tsHeap_))) &&
+              SUCCEEDED(dev12_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                        IID_PPV_ARGS(&tsRead_))) &&
+              SUCCEEDED(queue_->GetTimestampFrequency(&tsFreq_)) && tsFreq_ != 0))
+        {
+            tsHeap_.Reset();
+            tsRead_.Reset();
+        }
+    }
+
     ShowWindow(overlay_, SW_SHOWNOACTIVATE);
     return CreateShared();
 }
@@ -928,7 +972,59 @@ bool Host::PresentFrame(ID3D11Texture2D* src)
     // 1) D3D11: copy the captured frame into the shared texture, then signal the shared fence.
     D3D11_BOX box{ static_cast<UINT>(cropX_), static_cast<UINT>(cropY_), 0, static_cast<UINT>(cropX_) + width_,
                    static_cast<UINT>(cropY_) + height_, 1 };
+    Q11* q = nullptr;
+    if (!q11Failed_)
+    {
+        q = &q11_[q11Idx_];
+        q11Idx_ = (q11Idx_ + 1) & 3;
+        if (!q->dj)
+        {
+            D3D11_QUERY_DESC qd{};
+            qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+            bool ok = SUCCEEDED(dev11_->CreateQuery(&qd, &q->dj));
+            qd.Query = D3D11_QUERY_TIMESTAMP;
+            ok = ok && SUCCEEDED(dev11_->CreateQuery(&qd, &q->a)) && SUCCEEDED(dev11_->CreateQuery(&qd, &q->b));
+            if (!ok)
+            {
+                q11Failed_ = true;
+                q = nullptr;
+            }
+        }
+        else if (q->pending)
+        {
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dd{};
+            UINT64 ta = 0, tb = 0;
+            if (ctx11_->GetData(q->dj.Get(), &dd, sizeof(dd), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+                ctx11_->GetData(q->a.Get(), &ta, sizeof(ta), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+                ctx11_->GetData(q->b.Get(), &tb, sizeof(tb), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK)
+            {
+                if (!dd.Disjoint && tb > ta && dd.Frequency)
+                {
+                    const double ms = 1000.0 * static_cast<double>(tb - ta) / static_cast<double>(dd.Frequency);
+                    gpu11Ms_ += ms;
+                    gpu11Max_ = (std::max)(gpu11Max_, ms);
+                    ++gpu11N_;
+                }
+                q->pending = false;
+            }
+            else
+            {
+                q = nullptr; // not ready yet: skip measuring this frame
+            }
+        }
+    }
+    if (q)
+    {
+        ctx11_->Begin(q->dj.Get());
+        ctx11_->End(q->a.Get());
+    }
     ctx11_->CopySubresourceRegion(shared11_.Get(), 0, 0, 0, 0, src, 0, &box);
+    if (q)
+    {
+        ctx11_->End(q->b.Get());
+        ctx11_->End(q->dj.Get());
+        q->pending = true;
+    }
     ++sharedFenceValue_;
     ctx11_4_->Signal(fence11_.Get(), sharedFenceValue_);
     ctx11_->Flush();
@@ -950,8 +1046,29 @@ bool Host::PresentFrame(ID3D11Texture2D* src)
     if (FAILED(swap_->GetBuffer(bbIdx, IID_PPV_ARGS(&bb))))
         return false;
 
+    if (tsRead_ && allocFence_[idx] != 0)
+    {
+        D3D12_RANGE rr{ static_cast<SIZE_T>(idx) * 16, static_cast<SIZE_T>(idx) * 16 + 16 };
+        void* base = nullptr;
+        if (SUCCEEDED(tsRead_->Map(0, &rr, &base)) && base)
+        {
+            const UINT64* t = reinterpret_cast<const UINT64*>(static_cast<const unsigned char*>(base) + static_cast<size_t>(idx) * 16);
+            if (t[1] > t[0])
+            {
+                const double ms = 1000.0 * static_cast<double>(t[1] - t[0]) / static_cast<double>(tsFreq_);
+                gpu12Ms_ += ms;
+                gpu12Max_ = (std::max)(gpu12Max_, ms);
+                ++gpu12N_;
+            }
+            D3D12_RANGE wr{ 0, 0 };
+            tsRead_->Unmap(0, &wr);
+        }
+    }
+
     allocs_[idx]->Reset();
     list_->Reset(allocs_[idx].Get(), nullptr);
+    if (tsHeap_)
+        list_->EndQuery(tsHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, idx * 2);
 
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -967,6 +1084,11 @@ bool Host::PresentFrame(ID3D11Texture2D* src)
     b.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
     list_->ResourceBarrier(1, &b);
 
+    if (tsHeap_)
+    {
+        list_->EndQuery(tsHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, idx * 2 + 1);
+        list_->ResolveQueryData(tsHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, idx * 2, 2, tsRead_.Get(), static_cast<UINT64>(idx) * 16);
+    }
     list_->Close();
     ID3D12CommandList* lists[] = { list_.Get() };
     queue_->ExecuteCommandLists(1, lists);
@@ -1483,6 +1605,9 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
     opt_.presentDelayMs = std::clamp<double>(static_cast<double>(GetPrivateProfileIntW(L"Advanced", L"PresentDelayMs", 0, oc::SettingsPath().c_str())), 0.0, 14.0);
     if (opt_.presentDelayMs > 0.0)
         Log("PresentDelayMs = %.0f", opt_.presentDelayMs);
+    opt_.probe = GetPrivateProfileIntW(L"Advanced", L"Probe", 0, oc::SettingsPath().c_str()) != 0;
+    if (opt_.probe)
+        Log("Probe on (picture change check)");
 
     {
         DEVMODEW dm{};
@@ -1696,6 +1821,11 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
                     Log("  picture changed: %d new, %d identical to the one before (longest run %d) of %d", contentNew_, contentRep_,
                         repMax_, contentNew_ + contentRep_);
                 contentNew_ = contentRep_ = repMax_ = 0;
+                if (gpu11N_ > 0 || gpu12N_ > 0)
+                    Log("  host GPU time per frame: D3D11 copy %.2f ms (max %.2f), D3D12 copy %.2f ms (max %.2f)",
+                        gpu11N_ ? gpu11Ms_ / gpu11N_ : 0.0, gpu11Max_, gpu12N_ ? gpu12Ms_ / gpu12N_ : 0.0, gpu12Max_);
+                gpu11Ms_ = gpu11Max_ = gpu12Ms_ = gpu12Max_ = 0.0;
+                gpu11N_ = gpu12N_ = 0;
                 Log("  housekeeping: longest %.2f ms (focus spoof scan %.2f ms)", houseMaxMs_, spoofMaxMs_);
                 presGaps_.clear();
                 houseMaxMs_ = 0.0;
@@ -1885,7 +2015,7 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
         {
             D3D11_TEXTURE2D_DESC td{};
             tex->GetDesc(&td);
-            if ((td.Format == DXGI_FORMAT_B8G8R8A8_UNORM || td.Format == DXGI_FORMAT_R8G8B8A8_UNORM) && td.Width >= 256 && td.Height >= 128)
+            if (opt_.probe && (td.Format == DXGI_FORMAT_B8G8R8A8_UNORM || td.Format == DXGI_FORMAT_R8G8B8A8_UNORM) && td.Width >= 256 && td.Height >= 128)
             {
                 if (!probe_[0])
                 {
