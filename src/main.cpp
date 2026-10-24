@@ -523,6 +523,8 @@ class Host
     UINT64 paceFrames_ = 0;
     std::chrono::steady_clock::time_point paceStatAt_{};
     std::chrono::steady_clock::time_point paceLast_{};
+    std::chrono::steady_clock::time_point halfNext_{}; // present mode 5: when the next base frame is due
+    bool halfSkip_ = false;                           // present mode 5: the last turn found no new frame, do not wait again
     double waitMs_ = 0.0;    // stats: time spent waiting for the allocator fence / inside Present, per 5 s
     double presentMs_ = 0.0;
 
@@ -1106,7 +1108,7 @@ bool Host::PresentFrame(ID3D11Texture2D* src)
     UINT interval = (opt_.vsync && !fgActive) ? 1 : 0;
     if (st_.presentMode == 1) interval = 0;
     else if (st_.presentMode == 2) interval = 1;
-    else if (st_.presentMode == 3) interval = opt_.vsync ? 1 : 0; // classic: the host's own VSync, FG or not
+    else if (st_.presentMode == 3 || st_.presentMode == 5) interval = opt_.vsync ? 1 : 0; // classic: the host's own VSync, FG or not
     else if (st_.presentMode == 4) interval = opt_.vsync ? 1 : 0; // Lossless-style: VSync only when asked for, otherwise tearing
     const auto tp0 = std::chrono::steady_clock::now();
     HRESULT hr = swap_->Present(interval, flags);
@@ -1580,7 +1582,7 @@ void Host::PollSettings()
         Log("PresentDelayMs = %d (live)", st_.presentDelay);
     }
     if (st_.presentMode != old.presentMode)
-        Log("Present mode %d (0 auto, 1 interval 0, 2 interval 1, 3 classic, 4 Lossless-style) - restart the capture to apply", st_.presentMode);
+        Log("Present mode %d (0 auto, 1 interval 0, 2 interval 1, 3 classic, 4 Lossless-style, 5 classic half refresh) - restart the capture to apply", st_.presentMode);
     if (st_.menuKey != old.menuKey)
     {
         opt_.menuKey = static_cast<int>(st_.menuKey);
@@ -1609,7 +1611,7 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
         GetPrivateProfileStringW(L"Advanced", L"PaceK", L"1", kb, 32, oc::SettingsPath().c_str());
         opt_.paceK = std::clamp(_wtof(kb), 0.0, 8.0);
     }
-    if (st_.presentMode == 3 || st_.presentMode == 4)
+    if (st_.presentMode == 3 || st_.presentMode == 4 || st_.presentMode == 5)
         opt_.overlayAlpha = 255; // classic / Lossless-style: plain opaque overlay (lets Windows flip it straight to the screen)
     Log("Overlay alpha %d, display affinity %d, PaceK %.2f", opt_.overlayAlpha, opt_.affinity, opt_.paceK);
     opt_.startDelayMs = std::clamp<int>(static_cast<int>(GetPrivateProfileIntW(L"Advanced", L"StartDelayMs", 1500, oc::SettingsPath().c_str())), 0, 10000);
@@ -1882,7 +1884,7 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
         }
 
         // VSync with Arthur frame generation: keep the host's frames k / refresh apart (k = presents per host frame).
-        if (opt_.vsync && st_.frameGenMode == 1 && st_.presentMode != 1 && st_.presentMode != 3 && st_.presentMode != 4 && refreshHz_ > 0.0)
+        if (opt_.vsync && st_.frameGenMode == 1 && st_.presentMode != 1 && st_.presentMode != 3 && st_.presentMode != 4 && st_.presentMode != 5 && refreshHz_ > 0.0)
         {
             const auto np = std::chrono::steady_clock::now();
             if (opt_.paceK >= 0.25)
@@ -1928,6 +1930,51 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
                 paceOutput_.Reset();
         }
 
+        // Present mode 5 (Classic, half refresh): hand the frame generator exactly refresh / 2 frames per second (60 Hz -> 30,
+        // 75 Hz -> 37.5), no more. Extra frames would only be generated, queued and dropped, and load the GPU. The wait ends on
+        // a real vblank, so every base frame is exactly two refreshes after the previous one.
+        if (st_.presentMode == 5 && refreshHz_ > 0.0)
+        {
+            if (halfSkip_)
+            {
+                halfSkip_ = false;
+            }
+            else
+            {
+                const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(2.0 / refreshHz_));
+                auto nowT = std::chrono::steady_clock::now();
+                if (halfNext_.time_since_epoch().count() == 0 || nowT > halfNext_ + period)
+                    halfNext_ = nowT; // first frame, or we fell behind: start over
+                if (!paceOutput_ && swap_)
+                    swap_->GetContainingOutput(&paceOutput_);
+                const auto margin = paceOutput_ ? std::chrono::milliseconds(3) : std::chrono::milliseconds(0);
+                for (;;)
+                {
+                    const auto left = halfNext_ - margin - std::chrono::steady_clock::now();
+                    if (left <= std::chrono::steady_clock::duration::zero())
+                        break;
+                    if (left > std::chrono::milliseconds(2))
+                        Sleep(1);
+                    else
+                        YieldProcessor();
+                }
+                if (paceOutput_)
+                {
+                    if (SUCCEEDED(paceOutput_->WaitForVBlank()))
+                        halfNext_ = std::chrono::steady_clock::now() + period;
+                    else
+                    {
+                        paceOutput_.Reset();
+                        halfNext_ += period;
+                    }
+                }
+                else
+                {
+                    halfNext_ += period;
+                }
+            }
+        }
+
         // Take the newest captured frame and drop older ones (lower latency than queueing them).
         wgc::Direct3D11CaptureFrame latest{ nullptr };
         for (;;)
@@ -1938,7 +1985,10 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
             latest = f;
         }
         if (!latest)
+        {
+            halfSkip_ = true;
             continue;
+        }
         const auto tGot = std::chrono::steady_clock::now();
 
         // Lossless-style mode: let the swap chain's frame queue drain first (latency 1), then take the newest captured

@@ -34,7 +34,7 @@ struct Settings
     UINT fpsKey = VK_PRIOR;      // FPS overlay on/off (FpsShortcutKey)
     UINT fpsCycleKey = VK_NEXT;  // FPS overlay type (FpsCycleShortcutKey)
     UINT fgKey = VK_END;         // frame generation on/off (FGShortcutKey)
-    int presentMode = 3;      // 0 auto (FG on: no wait, FG off: VSync), 1 always interval 0, 2 always interval 1, 3 classic 2.2.0 behaviour, 4 Lossless-style (tearing, latency 1)
+    int presentMode = 3;      // 0 auto (FG on: no wait, FG off: VSync), 1 always interval 0, 2 always interval 1, 3 classic 2.2.0 behaviour, 4 Lossless-style (tearing, latency 1), 5 classic + exactly refresh/2 base frames
     int presentDelay = 3;     // ms the host holds each frame before Present, 0..12
     int limitTarget = 0;      // RTSS limiter: 0 off, 1 game, 2 host, 3 global
     int limitMode = 1;        // RTSS limiter mode: 0 async, 1 front edge sync, 2 back edge sync
@@ -98,7 +98,7 @@ inline void LoadSettings(Settings& s)
     if (s.upscalerMode < 0 || s.upscalerMode > 2) s.upscalerMode = 0;
 
     s.presentMode = GetPrivateProfileIntW(L"Advanced", L"PresentMode", 3, path.c_str());
-    if (s.presentMode < 0 || s.presentMode > 4) s.presentMode = 3;
+    if (s.presentMode < 0 || s.presentMode > 5) s.presentMode = 3;
     s.presentDelay = GetPrivateProfileIntW(L"Advanced", L"PresentDelayMs", 3, path.c_str());
     if (s.presentDelay < 0 || s.presentDelay > 12) s.presentDelay = 3;
     s.limitTarget = GetPrivateProfileIntW(L"Limiter", L"Target", 0, path.c_str());
