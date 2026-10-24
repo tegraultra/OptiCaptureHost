@@ -1574,6 +1574,11 @@ void Host::PollSettings()
         opt_.vsync = st_.vsync;
         Log("VSync %s", st_.vsync ? "on" : "off");
     }
+    if (st_.presentDelay != old.presentDelay)
+    {
+        opt_.presentDelayMs = static_cast<double>(st_.presentDelay);
+        Log("PresentDelayMs = %d (live)", st_.presentDelay);
+    }
     if (st_.presentMode != old.presentMode)
         Log("Present mode %d (0 auto, 1 interval 0, 2 interval 1, 3 classic, 4 Lossless-style) - restart the capture to apply", st_.presentMode);
     if (st_.menuKey != old.menuKey)
@@ -1608,7 +1613,7 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
         opt_.overlayAlpha = 255; // classic / Lossless-style: plain opaque overlay (lets Windows flip it straight to the screen)
     Log("Overlay alpha %d, display affinity %d, PaceK %.2f", opt_.overlayAlpha, opt_.affinity, opt_.paceK);
     opt_.startDelayMs = std::clamp<int>(static_cast<int>(GetPrivateProfileIntW(L"Advanced", L"StartDelayMs", 1500, oc::SettingsPath().c_str())), 0, 10000);
-    opt_.presentDelayMs = std::clamp<double>(static_cast<double>(GetPrivateProfileIntW(L"Advanced", L"PresentDelayMs", 0, oc::SettingsPath().c_str())), 0.0, 14.0);
+    opt_.presentDelayMs = static_cast<double>(std::clamp(st_.presentDelay, 0, 12));
     if (opt_.presentDelayMs > 0.0)
         Log("PresentDelayMs = %.0f", opt_.presentDelayMs);
     opt_.probe = GetPrivateProfileIntW(L"Advanced", L"Probe", 0, oc::SettingsPath().c_str()) != 0;

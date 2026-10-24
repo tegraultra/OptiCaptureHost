@@ -34,7 +34,11 @@ struct Settings
     UINT fpsKey = VK_PRIOR;      // FPS overlay on/off (FpsShortcutKey)
     UINT fpsCycleKey = VK_NEXT;  // FPS overlay type (FpsCycleShortcutKey)
     UINT fgKey = VK_END;         // frame generation on/off (FGShortcutKey)
-    int presentMode = 0;      // 0 auto (FG on: no wait, FG off: VSync), 1 always interval 0, 2 always interval 1, 3 classic 2.2.0 behaviour, 4 Lossless-style (tearing, latency 1)
+    int presentMode = 3;      // 0 auto (FG on: no wait, FG off: VSync), 1 always interval 0, 2 always interval 1, 3 classic 2.2.0 behaviour, 4 Lossless-style (tearing, latency 1)
+    int presentDelay = 3;     // ms the host holds each frame before Present, 0..12
+    int limitTarget = 0;      // RTSS limiter: 0 off, 1 game, 2 host, 3 global
+    int limitMode = 1;        // RTSS limiter mode: 0 async, 1 front edge sync, 2 back edge sync
+    int limitFps = 0;         // 0 refresh rate, -2 half refresh rate, else fixed fps
     int boost = 3;            // performance mode, read by the host at start-up: 0 off, 1 CPU, 2 CPU + GPU high, 3 max
 
     Hotkey stop{ MOD_CONTROL | MOD_SHIFT, VK_F12 };     // close the capture host
@@ -93,8 +97,15 @@ inline void LoadSettings(Settings& s)
     s.upscalerMode = GetPrivateProfileIntW(L"Settings", L"UpscalerMode", 0, path.c_str());
     if (s.upscalerMode < 0 || s.upscalerMode > 2) s.upscalerMode = 0;
 
-    s.presentMode = GetPrivateProfileIntW(L"Advanced", L"PresentMode", 0, path.c_str());
-    if (s.presentMode < 0 || s.presentMode > 4) s.presentMode = 0;
+    s.presentMode = GetPrivateProfileIntW(L"Advanced", L"PresentMode", 3, path.c_str());
+    if (s.presentMode < 0 || s.presentMode > 4) s.presentMode = 3;
+    s.presentDelay = GetPrivateProfileIntW(L"Advanced", L"PresentDelayMs", 3, path.c_str());
+    if (s.presentDelay < 0 || s.presentDelay > 12) s.presentDelay = 3;
+    s.limitTarget = GetPrivateProfileIntW(L"Limiter", L"Target", 0, path.c_str());
+    if (s.limitTarget < 0 || s.limitTarget > 3) s.limitTarget = 0;
+    s.limitFps = GetPrivateProfileIntW(L"Limiter", L"Fps", 0, path.c_str());
+    s.limitMode = GetPrivateProfileIntW(L"Limiter", L"Mode", 1, path.c_str());
+    if (s.limitMode < 0 || s.limitMode > 2) s.limitMode = 1;
 
     s.boost = GetPrivateProfileIntW(L"Advanced", L"Boost", 3, path.c_str());
     if (s.boost < 0 || s.boost > 3) s.boost = 3;
@@ -133,6 +144,10 @@ inline void SaveSettings(const Settings& s)
     WritePrivateProfileStringW(L"Settings", L"FrameGenMode", std::to_wstring(s.frameGenMode).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Settings", L"UpscalerMode", std::to_wstring(s.upscalerMode).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Advanced", L"PresentMode", std::to_wstring(s.presentMode).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"Advanced", L"PresentDelayMs", std::to_wstring(s.presentDelay).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"Limiter", L"Target", std::to_wstring(s.limitTarget).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"Limiter", L"Mode", std::to_wstring(s.limitMode).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"Limiter", L"Fps", std::to_wstring(s.limitFps).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Advanced", L"Boost", std::to_wstring(s.boost).c_str(), path.c_str());
     WritePrivateProfileStringW(L"General", L"MenuKey", std::to_wstring(s.menuKey).c_str(), path.c_str());
     WritePrivateProfileStringW(L"General", L"FpsKey", std::to_wstring(s.fpsKey).c_str(), path.c_str());
