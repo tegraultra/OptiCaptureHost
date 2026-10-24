@@ -28,7 +28,7 @@ struct Hotkey
 struct Settings
 {
     bool vsync = true;
-    int frameGenMode = 0; // 0=XeFG, 1=DLSSG, 2=nofg, 3=fsrfg
+    int frameGenMode = 0; // 0=XeFG, 1=DLSSG, 2=nofg, 3=fsrfg, 4=Intel FG profile (OptiScaler.ini from the "intel FG" folder)
     int upscalerMode = 0; // 0=xess, 1=ffx, 2=dlss
     UINT menuKey = VK_INSERT; // OptiScaler menu key (OptiScaler.ini [Menu] ShortcutKey)
     UINT fpsKey = VK_PRIOR;      // FPS overlay on/off (FpsShortcutKey)
@@ -93,7 +93,7 @@ inline void LoadSettings(Settings& s)
     s.vsync = GetPrivateProfileIntW(L"General", L"VSync", 1, path.c_str()) != 0;
 
     s.frameGenMode = GetPrivateProfileIntW(L"Settings", L"FrameGenMode", 0, path.c_str());
-    if (s.frameGenMode < 0 || s.frameGenMode > 3) s.frameGenMode = 0;
+    if (s.frameGenMode < 0 || s.frameGenMode > 4) s.frameGenMode = 0;
 
     s.upscalerMode = GetPrivateProfileIntW(L"Settings", L"UpscalerMode", 0, path.c_str());
     if (s.upscalerMode < 0 || s.upscalerMode > 2) s.upscalerMode = 0;

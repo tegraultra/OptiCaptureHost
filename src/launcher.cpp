@@ -51,7 +51,7 @@ constexpr const wchar_t* kTelegramText = L"t.me/MKJH_APPS";
 constexpr const wchar_t* kHostExe = L"OptiCaptureHost.exe";
 constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host's overlay window class
 
-constexpr const wchar_t* kVersion = L"2.6.5";
+constexpr const wchar_t* kVersion = L"2.6.6";
 
 constexpr float kW = 796.0f; // client size in logical pixels (scaled by the DPI)
 constexpr float kH = 714.0f;
@@ -1779,7 +1779,7 @@ void App::PaintLive(gp::Graphics& g, const gp::RectF& view)
     };
 
     static const wchar_t* fgShort[] = { L"Intel Multi Frame Generation", L"Arthur Multi Frame Generation", L"No Frame Generation",
-                                        L"FSR Frame Generation" };
+                                        L"FSR Frame Generation", L"Intel Frame Generation" };
     static const wchar_t* vsShort[] = { L"Auto", L"On · 0", L"On · 1", L"Off" };
     static const wchar_t* focusNames[] = { L"Game", L"Overlay", L"Other window" };
 
@@ -1797,7 +1797,7 @@ void App::PaintLive(gp::Graphics& g, const gp::RectF& view)
         liveValid_ ? std::to_wstring(live_.interval) + L"   · VSync " + vsShort[vsyncMode_ < 0 ? 0 : (vsyncMode_ == 2 ? 1 : (vsyncMode_ == 1 ? 2 : 3))] : dash,
         col::Text());
     row(L"Focus", liveValid_ ? focusNames[(live_.focus >= 0 && live_.focus <= 2) ? live_.focus : 2] : dash, col::Text());
-    row(L"Frame generation", fgShort[(st_.frameGenMode >= 0 && st_.frameGenMode <= 3) ? st_.frameGenMode : 0], col::Text());
+    row(L"Frame generation", fgShort[(st_.frameGenMode >= 0 && st_.frameGenMode <= 4) ? st_.frameGenMode : 0], col::Text());
 
     if (capActive_ || blockActive_)
     {
@@ -2061,6 +2061,7 @@ void App::OnClick(int id)
             AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 1 ? MF_CHECKED : 0), kFgMenuBase + 1, L"Arthur Multi Frame Generation");
             AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 2 ? MF_CHECKED : 0), kFgMenuBase + 2, L"No Frame Generation");
             AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 3 ? MF_CHECKED : 0), kFgMenuBase + 3, L"FSR Frame Generation");
+            AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 4 ? MF_CHECKED : 0), kFgMenuBase + 4, L"Intel Frame Generation  (own OptiScaler.ini)");
 
             POINT pt{};
             GetCursorPos(&pt);
@@ -2069,7 +2070,7 @@ void App::OnClick(int id)
                 pt.x, pt.y, 0, hwnd_, nullptr);
             DestroyMenu(menu);
 
-            if (cmd >= kFgMenuBase && cmd <= kFgMenuBase + 3)
+            if (cmd >= kFgMenuBase && cmd <= kFgMenuBase + 4)
             {
                 st_.frameGenMode = static_cast<int>(cmd - kFgMenuBase);
                 Save();
@@ -2078,7 +2079,8 @@ void App::OnClick(int id)
                     L"Intel Multi Frame Generation",
                     L"Arthur Multi Frame Generation",
                     L"No Frame Generation",
-                    L"FSR Frame Generation"
+                    L"FSR Frame Generation",
+                    L"Intel Frame Generation"
                 };
                 SetNote(std::wstring(L"Selected: ") + names[st_.frameGenMode] + L". Press Apply to write OptiScaler.ini.", Note::Ok);
             }
@@ -2086,18 +2088,41 @@ void App::OnClick(int id)
     }
     else if (id == kIdFrameGenApply)
     {
-        if (st_.frameGenMode < 0 || st_.frameGenMode > 3)
+        if (st_.frameGenMode < 0 || st_.frameGenMode > 4)
         {
             SetNote(L"Invalid Frame Generation selection.", Note::Error);
         }
-        else if (st_.frameGenMode == 1)
+        else if (st_.frameGenMode == 1 || st_.frameGenMode == 4)
         {
-            // Arthur Multi Frame Generation: use the ready-made OptiScaler.ini from the "artur" folder.
-            const std::wstring src = oc::ExeDir() + L"artur\\OptiScaler.ini";
+            // Arthur (folder "artur") and Intel Frame Generation (folder "intel FG"): use the ready-made OptiScaler.ini
+            // from that folder next to the launcher.
+            const bool arthur = st_.frameGenMode == 1;
+            std::wstring src;
+            std::wstring shown;
+            if (arthur)
+            {
+                shown = L"artur";
+                src = oc::ExeDir() + L"artur\\OptiScaler.ini";
+            }
+            else
+            {
+                shown = L"intel FG";
+                for (const wchar_t* folder : { L"intel FG", L"intel_FG", L"intelFG", L"intel-FG" })
+                {
+                    const std::wstring cand = oc::ExeDir() + folder + L"\\OptiScaler.ini";
+                    if (GetFileAttributesW(cand.c_str()) != INVALID_FILE_ATTRIBUTES)
+                    {
+                        src = cand;
+                        break;
+                    }
+                }
+                if (src.empty())
+                    src = oc::ExeDir() + L"intel FG\\OptiScaler.ini";
+            }
             const std::wstring dst = oc::ExeDir() + L"OptiScaler.ini";
             if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES)
             {
-                SetNote(L"The artur\\OptiScaler.ini file was not found next to the launcher.", Note::Error);
+                SetNote(L"The " + shown + L"\\OptiScaler.ini file was not found next to the launcher.", Note::Error);
             }
             else if (!CopyFileW(src.c_str(), dst.c_str(), FALSE))
             {
@@ -2108,7 +2133,7 @@ void App::OnClick(int id)
                 WriteOptiScalerKeys(st_);
                 ApplyVsyncToOptiScaler();
                 Save();
-                SetNote(L"OptiScaler.ini replaced with the Arthur one. Restart the game to use the change.", Note::Ok);
+                SetNote(std::wstring(L"OptiScaler.ini replaced with the ") + (arthur ? L"Arthur" : L"Intel FG") + L" one. Restart the game to use the change.", Note::Ok);
             }
         }
         else
@@ -2916,7 +2941,8 @@ void App::Paint(HDC dc, int W, int H)
                 L"Intel Multi Frame Generation",
                 L"Arthur Multi Frame Generation",
                 L"No Frame Generation",
-                L"FSR Frame Generation"
+                L"FSR Frame Generation",
+                L"Intel Frame Generation"
             };
 
             Text(g, L"Frame Generation", *f_.bodyB,
@@ -2927,7 +2953,7 @@ void App::Paint(HDC dc, int W, int H)
             FillRound(g, selector, S(8), selectorHot ? col::RowHot() : col::Row());
             StrokeRound(g, selector, S(8),
                 selectorHot ? col::Accent() : col::Line(), max(1.0f, S(1)));
-            Text(g, fgNames[(st_.frameGenMode >= 0 && st_.frameGenMode <= 3)
+            Text(g, fgNames[(st_.frameGenMode >= 0 && st_.frameGenMode <= 4)
                 ? st_.frameGenMode : 0], *f_.chip,
                 R(568, 418, 214, 22), locked ? col::Muted() : col::Text());
             if (!locked)
