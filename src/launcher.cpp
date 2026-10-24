@@ -2620,7 +2620,7 @@ void App::OnClick(int id)
         else
         {
             static const wchar_t* values[] = {
-                L"xess", L"ffx", L"dlss", L"dlss"
+                L"xess", L"ffx", L"dlss", L"ffx" /* DLSS 3.7 for AMD / GTX 16 runs on the FSR upscaler */
             };
             const std::wstring iniPath = oc::ExeDir() + L"OptiScaler.ini";
 
