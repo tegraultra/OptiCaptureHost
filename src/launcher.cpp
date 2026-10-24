@@ -51,7 +51,7 @@ constexpr const wchar_t* kTelegramText = L"t.me/MKJH_APPS";
 constexpr const wchar_t* kHostExe = L"OptiCaptureHost.exe";
 constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host's overlay window class
 
-constexpr const wchar_t* kVersion = L"2.6.6";
+constexpr const wchar_t* kVersion = L"2.6.7";
 
 constexpr float kW = 796.0f; // client size in logical pixels (scaled by the DPI)
 constexpr float kH = 714.0f;
@@ -2061,7 +2061,7 @@ void App::OnClick(int id)
             AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 1 ? MF_CHECKED : 0), kFgMenuBase + 1, L"Arthur Multi Frame Generation");
             AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 2 ? MF_CHECKED : 0), kFgMenuBase + 2, L"No Frame Generation");
             AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 3 ? MF_CHECKED : 0), kFgMenuBase + 3, L"FSR Frame Generation");
-            AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 4 ? MF_CHECKED : 0), kFgMenuBase + 4, L"Intel Frame Generation  (own OptiScaler.ini)");
+            AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 4 ? MF_CHECKED : 0), kFgMenuBase + 4, L"Intel Frame Generation");
 
             POINT pt{};
             GetCursorPos(&pt);
@@ -2092,32 +2092,29 @@ void App::OnClick(int id)
         {
             SetNote(L"Invalid Frame Generation selection.", Note::Error);
         }
-        else if (st_.frameGenMode == 1 || st_.frameGenMode == 4)
+        else if (st_.frameGenMode == 0 || st_.frameGenMode == 1 || st_.frameGenMode == 4)
         {
-            // Arthur (folder "artur") and Intel Frame Generation (folder "intel FG"): use the ready-made OptiScaler.ini
-            // from that folder next to the launcher.
+            // Intel MFG (folder "intel MFG"), Arthur (folder "artur") and Intel Frame Generation (folder "intel FG"): use
+            // the ready-made OptiScaler.ini from that folder next to the launcher.
             const bool arthur = st_.frameGenMode == 1;
-            std::wstring src;
-            std::wstring shown;
-            if (arthur)
-            {
-                shown = L"artur";
-                src = oc::ExeDir() + L"artur\\OptiScaler.ini";
-            }
+            const wchar_t* shownName = st_.frameGenMode == 0 ? L"intel MFG" : (arthur ? L"artur" : L"intel FG");
+            std::vector<std::wstring> folders;
+            if (st_.frameGenMode == 0)
+                folders = { L"intel MFG", L"intel_MFG", L"intelMFG", L"intel-MFG" };
+            else if (arthur)
+                folders = { L"artur" };
             else
+                folders = { L"intel FG", L"intel_FG", L"intelFG", L"intel-FG" };
+            const std::wstring shown = shownName;
+            std::wstring src = oc::ExeDir() + folders[0] + L"\\OptiScaler.ini";
+            for (const std::wstring& folder : folders)
             {
-                shown = L"intel FG";
-                for (const wchar_t* folder : { L"intel FG", L"intel_FG", L"intelFG", L"intel-FG" })
+                const std::wstring cand = oc::ExeDir() + folder + L"\\OptiScaler.ini";
+                if (GetFileAttributesW(cand.c_str()) != INVALID_FILE_ATTRIBUTES)
                 {
-                    const std::wstring cand = oc::ExeDir() + folder + L"\\OptiScaler.ini";
-                    if (GetFileAttributesW(cand.c_str()) != INVALID_FILE_ATTRIBUTES)
-                    {
-                        src = cand;
-                        break;
-                    }
+                    src = cand;
+                    break;
                 }
-                if (src.empty())
-                    src = oc::ExeDir() + L"intel FG\\OptiScaler.ini";
             }
             const std::wstring dst = oc::ExeDir() + L"OptiScaler.ini";
             if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES)
@@ -2133,7 +2130,7 @@ void App::OnClick(int id)
                 WriteOptiScalerKeys(st_);
                 ApplyVsyncToOptiScaler();
                 Save();
-                SetNote(std::wstring(L"OptiScaler.ini replaced with the ") + (arthur ? L"Arthur" : L"Intel FG") + L" one. Restart the game to use the change.", Note::Ok);
+                SetNote(std::wstring(L"OptiScaler.ini replaced with the ") + (arthur ? L"Arthur" : (st_.frameGenMode == 0 ? L"Intel MFG" : L"Intel FG")) + L" one. Restart the game to use the change.", Note::Ok);
             }
         }
         else
