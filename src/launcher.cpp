@@ -746,6 +746,27 @@ std::string Narrow(const std::wstring& w)
     return r;
 }
 
+// Small text log next to the program (rtss_log.txt) so a limiter that does nothing can be diagnosed.
+void RtssLog(const std::wstring& line)
+{
+    const std::wstring path = oc::ExeDir() + L"rtss_log.txt";
+    HANDLE f = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE)
+        return;
+    SYSTEMTIME t{};
+    GetLocalTime(&t);
+    wchar_t head[40];
+    swprintf(head, 40, L"%02d:%02d:%02d  ", t.wHour, t.wMinute, t.wSecond);
+    const std::wstring w = std::wstring(head) + line + L"\r\n";
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string u(static_cast<size_t>(n > 0 ? n : 1), '\0');
+    if (n > 0)
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, u.data(), n, nullptr, nullptr);
+    DWORD wr = 0;
+    WriteFile(f, u.c_str(), static_cast<DWORD>(strlen(u.c_str())), &wr, nullptr);
+    CloseHandle(f);
+}
+
 // The profile functions exported by RTSSHooks64.dll (the same ones RTSS and MSI Afterburner use for their settings).
 struct RtssApi
 {
@@ -798,12 +819,17 @@ struct RtssApi
     {
         load(profile.c_str());
         DWORD d = static_cast<DWORD>(denominator), l = static_cast<DWORD>(limit), m = static_cast<DWORD>(syncLimiter);
-        set("FramerateLimitDenominator", reinterpret_cast<LPBYTE>(&d), sizeof(d));
-        set("FramerateLimit", reinterpret_cast<LPBYTE>(&l), sizeof(l));
-        set("SyncLimiter", reinterpret_cast<LPBYTE>(&m), sizeof(m));
+        const BOOL r1 = set("FramerateLimitDenominator", reinterpret_cast<LPBYTE>(&d), sizeof(d));
+        const BOOL r2 = set("FramerateLimit", reinterpret_cast<LPBYTE>(&l), sizeof(l));
+        const BOOL r3 = set("SyncLimiter", reinterpret_cast<LPBYTE>(&m), sizeof(m));
         save(profile.c_str());
         update();
-        return Read(profile, "FramerateLimit", -1) == limit;
+        const int back = Read(profile, "FramerateLimit", -1);
+        RtssLog(L"write profile \"" + std::wstring(profile.begin(), profile.end()) + L"\": limit " + std::to_wstring(limit) + L" den " +
+                std::to_wstring(denominator) + L" mode " + std::to_wstring(syncLimiter) + L" -> set results " + std::to_wstring(r1) +
+                std::to_wstring(r2) + std::to_wstring(r3) + L", read back limit " + std::to_wstring(back) + L", mode " +
+                std::to_wstring(Read(profile, "SyncLimiter", -1)));
+        return back == limit;
     }
 };
 
@@ -836,6 +862,25 @@ class App
     LRESULT OnMessage(UINT m, WPARAM w, LPARAM l);
 
     float S(float v) const { return v * scale_ * 0.85f; }
+    // DPI scale, made smaller when the window would not fit the height of the screen (taskbar excluded)
+    float ScaleFor(UINT dpi, HWND wnd) const
+    {
+        const float base = static_cast<float>(dpi) / 96.0f;
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        HMONITOR mon = MonitorFromWindow(wnd, MONITOR_DEFAULTTOPRIMARY);
+        if (!GetMonitorInfoW(mon, &mi))
+            return base;
+        RECT rc{ 0, 0, static_cast<LONG>(kW * base), static_cast<LONG>(kH * base) };
+        AdjustWindowRectExForDpi(&rc, WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0, dpi);
+        const float nonClient = static_cast<float>((rc.bottom - rc.top) - static_cast<LONG>(kH * base));
+        const float availH = static_cast<float>(mi.rcWork.bottom - mi.rcWork.top) * 0.97f - nonClient;
+        const float availW = static_cast<float>(mi.rcWork.right - mi.rcWork.left) * 0.97f;
+        float fit = min(availH / (kH * base), availW / (kW * base));
+        if (fit > 1.0f) fit = 1.0f;
+        if (fit < 0.5f) fit = 0.5f;
+        return base * fit;
+    }
     gp::RectF R(float x, float y, float w, float h) const { return gp::RectF(S(x), S(y), S(w), S(h)); }
 
     void MakeFonts();
@@ -974,7 +1019,7 @@ bool App::Create(HINSTANCE inst)
 
     const DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     const UINT dpi = GetDpiForSystem();
-    scale_ = static_cast<float>(dpi) / 96.0f;
+    scale_ = ScaleFor(dpi, nullptr);
 
     RECT rc{ 0, 0, static_cast<LONG>(kW * scale_), static_cast<LONG>(kH * scale_) };
     AdjustWindowRectExForDpi(&rc, style, FALSE, 0, dpi);
@@ -1067,7 +1112,7 @@ void App::MakeFonts()
 
 void App::ApplyDpi(UINT dpi, const RECT* suggested)
 {
-    scale_ = static_cast<float>(dpi) / 96.0f;
+    scale_ = ScaleFor(dpi, hwnd_);
     MakeFonts();
 
     if (suggested)
@@ -1394,8 +1439,10 @@ void App::ApplyLimiter()
     if (st_.limitTarget != 0)
     {
         const std::wstring dir = RtssInstallDir();
+        RtssLog(L"apply: RTSS folder \"" + dir + L"\", running folder \"" + RtssDir() + L"\"");
         if (dir.empty() || !rtss_.Open(dir))
         {
+            RtssLog(L"RTSS missing or RTSSHooks64.dll could not be loaded (error " + std::to_wstring(GetLastError()) + L")");
             shownWarn_[kWarnRtssMissing] = false;
             RaiseWarning(kWarnRtssMissing,
                          L"The frame limiter uses RivaTuner Statistics Server (RTSS), and it was not found on this PC.\n\n"
