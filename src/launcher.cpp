@@ -51,7 +51,7 @@ constexpr const wchar_t* kTelegramText = L"t.me/MKJH_APPS";
 constexpr const wchar_t* kHostExe = L"OptiCaptureHost.exe";
 constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host's overlay window class
 
-constexpr const wchar_t* kVersion = L"2.6.8";
+constexpr const wchar_t* kVersion = L"2.6.9";
 
 constexpr float kW = 796.0f; // client size in logical pixels (scaled by the DPI)
 constexpr float kH = 714.0f;
@@ -1091,6 +1091,78 @@ LimiterOut RunLimiterElevated(const std::wstring& gameExe, int hz, bool off)
     return out;
 }
 
+// ---- Force Borderless ----
+struct BorderState
+{
+    HWND wnd = nullptr;
+    LONG_PTR style = 0;
+    LONG_PTR exStyle = 0;
+    RECT rect{};
+    bool wasMaximized = false;
+};
+
+// Takes the frame off a window and stretches it over its monitor. False when Windows refused the change.
+bool BorderApplyOn(HWND w, const BorderState& b)
+{
+    if (IsZoomed(w) || IsIconic(w))
+        ShowWindow(w, SW_RESTORE);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST), &mi))
+        return false;
+    LONG_PTR style = b.style & ~static_cast<LONG_PTR>(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZE | WS_MAXIMIZE | WS_SYSMENU);
+    style |= WS_POPUP;
+    const LONG_PTR ex = b.exStyle & ~static_cast<LONG_PTR>(WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_WINDOWEDGE);
+    SetLastError(0);
+    SetWindowLongPtrW(w, GWL_STYLE, style);
+    SetWindowLongPtrW(w, GWL_EXSTYLE, ex);
+    if (GetWindowLongPtrW(w, GWL_STYLE) != style)
+        return false;
+    SetWindowPos(w, nullptr, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
+                 mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    return true;
+}
+
+// Puts the frame, the size and the position back.
+bool BorderApplyOff(HWND w, const BorderState& b)
+{
+    SetWindowLongPtrW(w, GWL_STYLE, b.style);
+    SetWindowLongPtrW(w, GWL_EXSTYLE, b.exStyle);
+    if (GetWindowLongPtrW(w, GWL_STYLE) != b.style)
+        return false;
+    SetWindowPos(w, nullptr, b.rect.left, b.rect.top, b.rect.right - b.rect.left, b.rect.bottom - b.rect.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    if (b.wasMaximized)
+        ShowWindow(w, SW_MAXIMIZE);
+    return true;
+}
+
+// Same change from an elevated copy of this program (needed when the game runs as administrator and the launcher does not).
+bool RunBorderElevated(bool on, const BorderState& b)
+{
+    wchar_t self[MAX_PATH * 2] = {};
+    GetModuleFileNameW(nullptr, self, MAX_PATH * 2);
+    const std::wstring args = std::wstring(L"--borderless ") + (on ? L"on " : L"off ") +
+                              std::to_wstring(reinterpret_cast<ULONG_PTR>(b.wnd)) + L" " + std::to_wstring(static_cast<long long>(b.style)) +
+                              L" " + std::to_wstring(static_cast<long long>(b.exStyle)) + L" " + std::to_wstring(b.rect.left) + L" " +
+                              std::to_wstring(b.rect.top) + L" " + std::to_wstring(b.rect.right) + L" " + std::to_wstring(b.rect.bottom) +
+                              L" " + (b.wasMaximized ? L"1" : L"0");
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";
+    sei.lpFile = self;
+    sei.lpParameters = args.c_str();
+    sei.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&sei) || !sei.hProcess)
+        return false;
+    WaitForSingleObject(sei.hProcess, 30000);
+    DWORD code = 1;
+    GetExitCodeProcess(sei.hProcess, &code);
+    CloseHandle(sei.hProcess);
+    return code == 0;
+}
+
 class App
 {
   public:
@@ -1164,14 +1236,6 @@ class App
     // live status + warnings
     void LoadWarnFlags();
     void ApplyLimiter(bool off = false);
-    struct BorderState
-    {
-        HWND wnd = nullptr;
-        LONG_PTR style = 0;
-        LONG_PTR exStyle = 0;
-        RECT rect{};
-        bool wasMaximized = false;
-    };
     std::vector<BorderState> border_; // windows made borderless by this launcher (to bring the frame back)
     int BorderIndex(HWND w) const
     {
@@ -1745,13 +1809,18 @@ void App::ToggleBorderless()
     if (idx >= 0)
     {
         const BorderState b = border_[idx];
+        bool ok = BorderApplyOff(w, b);
+        if (!ok && !IsElevated())
+        {
+            SetNote(L"The game window needs administrator rights - allow the Windows prompt.", Note::Info);
+            ok = RunBorderElevated(false, b);
+        }
+        if (!ok)
+        {
+            SetNote(L"Could not bring the window frame back.", Note::Error);
+            return;
+        }
         border_.erase(border_.begin() + idx);
-        SetWindowLongPtrW(w, GWL_STYLE, b.style);
-        SetWindowLongPtrW(w, GWL_EXSTYLE, b.exStyle);
-        SetWindowPos(w, nullptr, b.rect.left, b.rect.top, b.rect.right - b.rect.left, b.rect.bottom - b.rect.top,
-                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-        if (b.wasMaximized)
-            ShowWindow(w, SW_MAXIMIZE);
         SetNote(L"Borderless is off: the window frame is back.", Note::Ok);
         Refresh();
         return;
@@ -1762,31 +1831,24 @@ void App::ToggleBorderless()
     b.style = GetWindowLongPtrW(w, GWL_STYLE);
     b.exStyle = GetWindowLongPtrW(w, GWL_EXSTYLE);
     b.wasMaximized = IsZoomed(w) != FALSE;
-    if (b.wasMaximized || IsIconic(w))
-        ShowWindow(w, SW_RESTORE);
-    GetWindowRect(w, &b.rect);
+    WINDOWPLACEMENT wp{};
+    wp.length = sizeof(wp);
+    if (GetWindowPlacement(w, &wp) && (b.wasMaximized || IsIconic(w)))
+        b.rect = wp.rcNormalPosition;
+    else
+        GetWindowRect(w, &b.rect);
 
-    MONITORINFO mi{};
-    mi.cbSize = sizeof(mi);
-    if (!GetMonitorInfoW(MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST), &mi))
+    bool ok = BorderApplyOn(w, b);
+    if (!ok && !IsElevated())
     {
-        SetNote(L"Could not find the monitor of that window.", Note::Error);
+        SetNote(L"The game window needs administrator rights - allow the Windows prompt.", Note::Info);
+        ok = RunBorderElevated(true, b);
+    }
+    if (!ok)
+    {
+        SetNote(L"Windows did not let the launcher change that window.", Note::Error);
         return;
     }
-
-    LONG_PTR style = b.style & ~static_cast<LONG_PTR>(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZE | WS_MAXIMIZE | WS_SYSMENU);
-    style |= WS_POPUP;
-    const LONG_PTR ex = b.exStyle & ~static_cast<LONG_PTR>(WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_WINDOWEDGE);
-    SetLastError(0);
-    SetWindowLongPtrW(w, GWL_STYLE, style);
-    SetWindowLongPtrW(w, GWL_EXSTYLE, ex);
-    if (GetWindowLongPtrW(w, GWL_STYLE) != style)
-    {
-        SetNote(L"Windows did not let the launcher change that window (is the game running as administrator?).", Note::Error);
-        return;
-    }
-    SetWindowPos(w, nullptr, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
-                 mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     border_.push_back(b);
     SetNote(L"Borderless is on. Press the button again to bring the frame back.", Note::Ok);
     Refresh();
@@ -3202,6 +3264,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
     {
         int argc = 0;
         wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv && argc >= 11 && wcscmp(argv[1], L"--borderless") == 0)
+        {
+            BorderState b;
+            const bool on = wcscmp(argv[2], L"on") == 0;
+            b.wnd = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(_wcstoui64(argv[3], nullptr, 10)));
+            b.style = static_cast<LONG_PTR>(_wcstoi64(argv[4], nullptr, 10));
+            b.exStyle = static_cast<LONG_PTR>(_wcstoi64(argv[5], nullptr, 10));
+            b.rect.left = _wtoi(argv[6]);
+            b.rect.top = _wtoi(argv[7]);
+            b.rect.right = _wtoi(argv[8]);
+            b.rect.bottom = _wtoi(argv[9]);
+            b.wasMaximized = _wtoi(argv[10]) != 0;
+            LocalFree(argv);
+            if (!IsWindow(b.wnd))
+                return 1;
+            return (on ? BorderApplyOn(b.wnd, b) : BorderApplyOff(b.wnd, b)) ? 0 : 1;
+        }
         if (argv && argc >= 4 && wcscmp(argv[1], L"--rtss-apply") == 0)
         {
             const std::wstring exe = wcscmp(argv[2], L"-") == 0 ? std::wstring() : std::wstring(argv[2]);
