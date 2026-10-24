@@ -2585,11 +2585,13 @@ void App::OnClick(int id)
             AppendMenuW(menu, MF_STRING | (st_.upscalerMode == 0 ? MF_CHECKED : 0),
                 kUpscalerMenuBase + 0, L"Intel XeSS");
             AppendMenuW(menu, MF_STRING | (st_.upscalerMode == 1 ? MF_CHECKED : 0),
-                kUpscalerMenuBase + 1, L"AMD FSR 3 & 4");
+                kUpscalerMenuBase + 1, L"AMD FSR 3.1.5");
             AppendMenuW(menu, MF_STRING | (st_.upscalerMode == 2 ? MF_CHECKED : 0),
                 kUpscalerMenuBase + 2, L"NVIDIA DLSS");
             AppendMenuW(menu, MF_STRING | (st_.upscalerMode == 3 ? MF_CHECKED : 0),
                 kUpscalerMenuBase + 3, L"DLSS 3.7  (AMD and GTX 16 cards)");
+            AppendMenuW(menu, MF_STRING | (st_.upscalerMode == 4 ? MF_CHECKED : 0),
+                kUpscalerMenuBase + 4, L"AMD FSR 4.1.2");
 
             POINT pt{};
             GetCursorPos(&pt);
@@ -2598,13 +2600,13 @@ void App::OnClick(int id)
                 pt.x, pt.y, 0, hwnd_, nullptr);
             DestroyMenu(menu);
 
-            if (cmd >= kUpscalerMenuBase && cmd <= kUpscalerMenuBase + 3)
+            if (cmd >= kUpscalerMenuBase && cmd <= kUpscalerMenuBase + 4)
             {
                 st_.upscalerMode = static_cast<int>(cmd - kUpscalerMenuBase);
                 Save();
 
                 static const wchar_t* names[] = {
-                    L"Intel XeSS", L"AMD FSR 3 & 4", L"NVIDIA DLSS", L"DLSS 3.7 (AMD / GTX 16)"
+                    L"Intel XeSS", L"AMD FSR 3.1.5", L"NVIDIA DLSS", L"DLSS 3.7 (AMD / GTX 16)", L"AMD FSR 4.1.2"
                 };
                 SetNote(std::wstring(L"Selected: ") + names[st_.upscalerMode] +
                     L". Press Apply to write OptiScaler.ini.", Note::Ok);
@@ -2613,14 +2615,14 @@ void App::OnClick(int id)
     }
     else if (id == kIdUpscalerApply)
     {
-        if (st_.upscalerMode < 0 || st_.upscalerMode > 3)
+        if (st_.upscalerMode < 0 || st_.upscalerMode > 4)
         {
             SetNote(L"Invalid Upscaler selection.", Note::Error);
         }
         else
         {
             static const wchar_t* values[] = {
-                L"xess", L"ffx", L"dlss", L"ffx" /* DLSS 3.7 for AMD / GTX 16 runs on the FSR upscaler */
+                L"xess", L"ffx", L"dlss", L"ffx" /* DLSS 3.7 for AMD / GTX 16 runs on the FSR upscaler */, L"ffx"
             };
             const std::wstring iniPath = oc::ExeDir() + L"OptiScaler.ini";
 
@@ -2628,10 +2630,24 @@ void App::OnClick(int id)
                     L"Upscalers", L"Dx12Upscaler",
                     values[st_.upscalerMode], iniPath.c_str()))
             {
-                // FSR 3 & 4 and DLSS 3.7: also put the ready-made DLL set of that folder into the MK-JH folder.
-                if (st_.upscalerMode == 1 || st_.upscalerMode == 3)
+                // FSR 3.1.5: FSR upscaler index 2. FSR 4.1.2: automatic index, plus sharpness, CAS and the native upscaler pass.
+                if (st_.upscalerMode == 1)
                 {
-                    const bool fsr = st_.upscalerMode == 1;
+                    WritePrivateProfileStringW(L"FSR", L"UpscalerIndex", L"2", iniPath.c_str());
+                }
+                else if (st_.upscalerMode == 4)
+                {
+                    WritePrivateProfileStringW(L"FSR", L"UpscalerIndex", L"auto", iniPath.c_str());
+                    WritePrivateProfileStringW(L"Sharpness", L"OverrideSharpness", L"true", iniPath.c_str());
+                    WritePrivateProfileStringW(L"Sharpness", L"Sharpness", L"0.600000", iniPath.c_str());
+                    WritePrivateProfileStringW(L"CAS", L"Enabled", L"true", iniPath.c_str());
+                    WritePrivateProfileStringW(L"DlssNr", L"NativeUpscalerPass", L"true", iniPath.c_str());
+                }
+
+                // FSR 3.1.5, FSR 4.1.2 and DLSS 3.7: also put the ready-made DLL set of that folder into the MK-JH folder.
+                if (st_.upscalerMode == 1 || st_.upscalerMode == 3 || st_.upscalerMode == 4)
+                {
+                    const bool fsr = st_.upscalerMode == 1 || st_.upscalerMode == 4;
                     const std::vector<std::wstring> names = fsr
                         ? std::vector<std::wstring>{ L"FSR 4", L"FSR4", L"FSR_4", L"FSR-4" }
                         : std::vector<std::wstring>{ L"Dlss 3.7", L"Dlss3.7", L"Dlss_3.7", L"Dlss-3.7" };
@@ -3302,9 +3318,10 @@ void App::Paint(HDC dc, int W, int H)
         {
             static const wchar_t* upscalerNames[] = {
                 L"Intel XeSS",
-                L"AMD FSR 3 & 4",
+                L"AMD FSR 3.1.5",
                 L"NVIDIA DLSS",
-                L"DLSS 3.7  (AMD / GTX 16)"
+                L"DLSS 3.7  (AMD / GTX 16)",
+                L"AMD FSR 4.1.2"
             };
 
             Text(g, L"Upscaler", *f_.bodyB,
@@ -3315,7 +3332,7 @@ void App::Paint(HDC dc, int W, int H)
             FillRound(g, selector, S(8), selectorHot ? col::RowHot() : col::Row());
             StrokeRound(g, selector, S(8),
                 selectorHot ? col::Accent() : col::Line(), max(1.0f, S(1)));
-            Text(g, upscalerNames[(st_.upscalerMode >= 0 && st_.upscalerMode <= 3)
+            Text(g, upscalerNames[(st_.upscalerMode >= 0 && st_.upscalerMode <= 4)
                 ? st_.upscalerMode : 0], *f_.chip,
                 R(568, 478, 214, 22), locked ? col::Muted() : col::Text());
             if (!locked)

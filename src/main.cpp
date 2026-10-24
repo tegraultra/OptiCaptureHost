@@ -79,6 +79,7 @@ struct __declspec(uuid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")) DxgiInterfaceAcc
 constexpr int kHotkeyQuit = 1;
 constexpr int kHotkeyInteractive = 2;
 constexpr int kHotkeyMenu = 3;
+constexpr UINT kMsgMenuKey = WM_APP + 41; // posted by the keyboard hook: the user pressed the menu key
 
 bool IsExtendedVk(int vk)
 {
@@ -472,6 +473,21 @@ class Host
     void ToggleInteractive();
     bool ForceForeground(HWND h);
     void OpenMenu();
+    void CloseMenu();
+    // The menu key (Insert) pressed by the user: first press focuses the overlay and opens OptiScaler's menu, the next
+    // one closes the menu and gives the focus back to the game. Seen through a low-level keyboard hook, which only acts
+    // while the game or the overlay is the foreground window.
+    void InstallKeyHook();
+    void RemoveKeyHook();
+    bool OnUserMenuKey(bool down);
+    static LRESULT CALLBACK KeyHookProc(int code, WPARAM w, LPARAM l);
+    static Host* hookOwner_;
+    HHOOK keyHook_ = nullptr;
+    DWORD mainThread_ = 0;
+    bool menuOpen_ = false;        // the menu was opened by us and not closed yet
+    bool menuReturn_ = false;      // after the menu key is released: give the focus back to the game
+    bool keySwallowed_ = false;    // the user's menu key is held down and was swallowed
+    bool menuKeyHook_ = true;      // [Advanced] MenuKeyToggle (default on)
     void SendMenuKey(bool up);
     void WaitFenceValue(UINT64 v);
     void WaitGpu();
@@ -485,7 +501,7 @@ class Host
     UINT width_ = 0;
     UINT height_ = 0;
     bool interactive_ = false;
-    int menuKeyStage_ = 0; // 0 idle, 1 waiting to press the menu key, 2 waiting to release it
+    int menuKeyStage_ = 0; // 0 idle, 1 waiting to press the menu key, 2 waiting to release it, 3 waiting to hand the focus back
     std::chrono::steady_clock::time_point menuKeyAt_{};
     bool tearing_ = false;
     UINT swapFlags_ = 0;
@@ -1353,6 +1369,7 @@ void Host::ToggleInteractive()
     }
     else
     {
+        menuOpen_ = false;
         ForceForeground(target_);
         Log("Click-through ON: focus returned to the game.");
     }
@@ -1402,14 +1419,105 @@ void Host::SendMenuKey(bool up)
 // OptiScaler has seen the focus change first). Press it again to close the menu.
 void Host::OpenMenu()
 {
+    if (menuOpen_ && interactive_)
+    {
+        CloseMenu();
+        return;
+    }
     if (!interactive_)
         ToggleInteractive();
     else
         ForceForeground(overlay_);
 
+    menuOpen_ = true;
+    menuReturn_ = false;
     Log("Pressing the menu key (vk 0x%02X) for OptiScaler", opt_.menuKey);
     menuKeyStage_ = 1;
     menuKeyAt_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+}
+
+// Close OptiScaler's menu (press its key once more) and hand the focus back to the game afterwards.
+void Host::CloseMenu()
+{
+    menuOpen_ = false;
+    menuReturn_ = true;
+    Log("Closing the OptiScaler menu and returning the focus to the game");
+    menuKeyStage_ = 1;
+    menuKeyAt_ = std::chrono::steady_clock::now();
+}
+
+Host* Host::hookOwner_ = nullptr;
+
+LRESULT CALLBACK Host::KeyHookProc(int code, WPARAM w, LPARAM l)
+{
+    if (code == HC_ACTION && hookOwner_ != nullptr)
+    {
+        const KBDLLHOOKSTRUCT* k = reinterpret_cast<const KBDLLHOOKSTRUCT*>(l);
+        if ((k->flags & LLKHF_INJECTED) == 0 && static_cast<int>(k->vkCode) == hookOwner_->opt_.menuKey)
+        {
+            const bool down = w == WM_KEYDOWN || w == WM_SYSKEYDOWN;
+            const bool up = w == WM_KEYUP || w == WM_SYSKEYUP;
+            if ((down || up) && hookOwner_->OnUserMenuKey(down))
+                return 1;
+        }
+    }
+    return CallNextHookEx(nullptr, code, w, l);
+}
+
+// Runs inside the hook (must be quick): decide whether to swallow the key and wake the main loop to do the work.
+bool Host::OnUserMenuKey(bool down)
+{
+    if (!down)
+    {
+        if (keySwallowed_)
+        {
+            keySwallowed_ = false;
+            return true;
+        }
+        return false;
+    }
+    if (keySwallowed_)
+        return true; // key repeat of a press we took
+    if (!menuKeyHook_)
+        return false;
+
+    // only while the game (its process) or our overlay is in front
+    HWND fg = GetForegroundWindow();
+    if (!fg)
+        return false;
+    bool ours = fg == overlay_ || fg == target_;
+    if (!ours)
+    {
+        DWORD pf = 0, pt = 0;
+        GetWindowThreadProcessId(fg, &pf);
+        GetWindowThreadProcessId(target_, &pt);
+        ours = pf != 0 && pf == pt;
+    }
+    if (!ours)
+        return false;
+
+    keySwallowed_ = true;
+    PostThreadMessageW(mainThread_, kMsgMenuKey, 0, 0);
+    return true;
+}
+
+void Host::InstallKeyHook()
+{
+    if (keyHook_ || !menuKeyHook_)
+        return;
+    hookOwner_ = this;
+    mainThread_ = GetCurrentThreadId();
+    keyHook_ = SetWindowsHookExW(WH_KEYBOARD_LL, KeyHookProc, GetModuleHandleW(nullptr), 0);
+    Log(keyHook_ ? "Menu key toggle on: Insert opens the OptiScaler menu with focus, and closes it back to the game"
+                 : "Menu key toggle: could not install the keyboard hook");
+}
+
+void Host::RemoveKeyHook()
+{
+    if (keyHook_)
+        UnhookWindowsHookEx(keyHook_);
+    keyHook_ = nullptr;
+    hookOwner_ = nullptr;
 }
 
 // Once a second: write what the launcher shows in its live panel.
@@ -1495,6 +1603,7 @@ void Host::Shutdown()
 
     WaitGpu();
     UnregisterHotkeys();
+    RemoveKeyHook();
     if (parentProc_)
         CloseHandle(parentProc_);
     if (waitable_)
@@ -1666,6 +1775,9 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
     }
 
     RegisterHotkeys();
+    // [Advanced] MenuKeyToggle=0 turns the Insert (menu key) handling off.
+    menuKeyHook_ = GetPrivateProfileIntW(L"Advanced", L"MenuKeyToggle", 1, oc::SettingsPath().c_str()) != 0;
+    InstallKeyHook();
 
     // [Advanced] FocusSpoof=0 in OptiCaptureHost.ini turns the focus spoof off.
     focusSpoof_ = GetPrivateProfileIntW(L"Advanced", L"FocusSpoof", 1, oc::SettingsPath().c_str()) != 0;
@@ -1732,6 +1844,8 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
                 ToggleInteractive();
             else if (msg.message == WM_HOTKEY && msg.wParam == kHotkeyMenu)
                 OpenMenu();
+            else if (msg.message == kMsgMenuKey)
+                OpenMenu(); // toggles: open with focus / close and return to the game
             else
             {
                 TranslateMessage(&msg);
@@ -1757,10 +1871,25 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
                 menuKeyStage_ = 2;
                 menuKeyAt_ = now + std::chrono::milliseconds(120);
             }
-            else
+            else if (menuKeyStage_ == 2)
             {
                 SendMenuKey(true);
+                if (menuReturn_)
+                {
+                    menuKeyStage_ = 3;
+                    menuKeyAt_ = now + std::chrono::milliseconds(150);
+                }
+                else
+                {
+                    menuKeyStage_ = 0;
+                }
+            }
+            else
+            {
                 menuKeyStage_ = 0;
+                menuReturn_ = false;
+                if (interactive_)
+                    ToggleInteractive(); // focus back to the game
             }
         }
 
