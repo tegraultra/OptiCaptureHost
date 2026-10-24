@@ -34,6 +34,7 @@ using std::min;
 #include <gdiplus.h>
 
 #include "settings.h"
+#include "version.h"
 
 #pragma comment(lib, "advapi32.lib")
 
@@ -51,7 +52,7 @@ constexpr const wchar_t* kTelegramText = L"t.me/MKJH_APPS";
 constexpr const wchar_t* kHostExe = L"OptiCaptureHost.exe";
 constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host's overlay window class
 
-constexpr const wchar_t* kVersion = L"2.7.2";
+constexpr const wchar_t* kVersion = L"" OC_VER_STR;
 
 constexpr float kW = 796.0f; // client size in logical pixels (scaled by the DPI)
 constexpr float kH = 770.0f;
