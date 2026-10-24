@@ -51,7 +51,7 @@ constexpr const wchar_t* kTelegramText = L"t.me/MKJH_APPS";
 constexpr const wchar_t* kHostExe = L"OptiCaptureHost.exe";
 constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host's overlay window class
 
-constexpr const wchar_t* kVersion = L"2.6.7";
+constexpr const wchar_t* kVersion = L"2.6.8";
 
 constexpr float kW = 796.0f; // client size in logical pixels (scaled by the DPI)
 constexpr float kH = 714.0f;
@@ -84,6 +84,7 @@ constexpr int kIdDelaySelect = 18;
 constexpr int kIdLimitMode = 19;
 constexpr int kIdLimitAuto = 24;
 constexpr int kIdLimitOff = 25;
+constexpr int kIdBorderless = 26;
 constexpr int kLimitModeMenuBase = 5800;
 constexpr int kLimitTargetMenuBase = 5500;
 constexpr int kLimitFpsMenuBase = 5600;
@@ -1163,6 +1164,23 @@ class App
     // live status + warnings
     void LoadWarnFlags();
     void ApplyLimiter(bool off = false);
+    struct BorderState
+    {
+        HWND wnd = nullptr;
+        LONG_PTR style = 0;
+        LONG_PTR exStyle = 0;
+        RECT rect{};
+        bool wasMaximized = false;
+    };
+    std::vector<BorderState> border_; // windows made borderless by this launcher (to bring the frame back)
+    int BorderIndex(HWND w) const
+    {
+        for (size_t i = 0; i < border_.size(); ++i)
+            if (border_[i].wnd == w)
+                return static_cast<int>(i);
+        return -1;
+    }
+    void ToggleBorderless();
     RtssApi rtss_;
     std::wstring limitInfo_; // what the limiter has applied (shown under the Apply button)
     void RaiseWarning(int kind, const std::wstring& text);
@@ -1705,6 +1723,73 @@ void App::ApplyLimiter(bool off)
     if (!r.info.empty())
         limitInfo_ = r.info;
     SetNote(r.note, r.code == 0 ? Note::Ok : Note::Error);
+}
+
+// Force Borderless: takes the frame off the selected game's window and stretches it over its monitor; pressing it again
+// brings the frame and the old size back. (Exclusive fullscreen cannot be changed this way.)
+void App::ToggleBorderless()
+{
+    if (selected_ < 0 || selected_ >= static_cast<int>(games_.size()))
+    {
+        SetNote(L"Pick a game in the list first.", Note::Error);
+        return;
+    }
+    const HWND w = games_[selected_].hwnd;
+    if (!IsWindow(w))
+    {
+        SetNote(L"That window is gone. Press Refresh.", Note::Error);
+        return;
+    }
+
+    const int idx = BorderIndex(w);
+    if (idx >= 0)
+    {
+        const BorderState b = border_[idx];
+        border_.erase(border_.begin() + idx);
+        SetWindowLongPtrW(w, GWL_STYLE, b.style);
+        SetWindowLongPtrW(w, GWL_EXSTYLE, b.exStyle);
+        SetWindowPos(w, nullptr, b.rect.left, b.rect.top, b.rect.right - b.rect.left, b.rect.bottom - b.rect.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        if (b.wasMaximized)
+            ShowWindow(w, SW_MAXIMIZE);
+        SetNote(L"Borderless is off: the window frame is back.", Note::Ok);
+        Refresh();
+        return;
+    }
+
+    BorderState b;
+    b.wnd = w;
+    b.style = GetWindowLongPtrW(w, GWL_STYLE);
+    b.exStyle = GetWindowLongPtrW(w, GWL_EXSTYLE);
+    b.wasMaximized = IsZoomed(w) != FALSE;
+    if (b.wasMaximized || IsIconic(w))
+        ShowWindow(w, SW_RESTORE);
+    GetWindowRect(w, &b.rect);
+
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST), &mi))
+    {
+        SetNote(L"Could not find the monitor of that window.", Note::Error);
+        return;
+    }
+
+    LONG_PTR style = b.style & ~static_cast<LONG_PTR>(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZE | WS_MAXIMIZE | WS_SYSMENU);
+    style |= WS_POPUP;
+    const LONG_PTR ex = b.exStyle & ~static_cast<LONG_PTR>(WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_WINDOWEDGE);
+    SetLastError(0);
+    SetWindowLongPtrW(w, GWL_STYLE, style);
+    SetWindowLongPtrW(w, GWL_EXSTYLE, ex);
+    if (GetWindowLongPtrW(w, GWL_STYLE) != style)
+    {
+        SetNote(L"Windows did not let the launcher change that window (is the game running as administrator?).", Note::Error);
+        return;
+    }
+    SetWindowPos(w, nullptr, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
+                 mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    border_.push_back(b);
+    SetNote(L"Borderless is on. Press the button again to bring the frame back.", Note::Ok);
+    Refresh();
 }
 
 void App::CloseDialog(bool accepted)
@@ -2274,6 +2359,10 @@ void App::OnClick(int id)
         Save();
         SetNote(st_.limitAuto ? L"The limiter will be applied every time you press START." : L"The limiter is applied only with the Apply button.", Note::Ok);
     }
+    else if (id == kIdBorderless)
+    {
+        ToggleBorderless();
+    }
     else if (id == kIdLimitOff)
     {
         st_.limitAuto = 0; // otherwise START would switch it on again
@@ -2692,6 +2781,19 @@ void App::Paint(HDC dc, int W, int H)
     Card(g, left);
     Text(g, L"Choose a game", *f_.h2, R(44, 112, 300, 24), col::Text());
     Text(g, L"Pick the window of the game you want to enhance", *f_.sm, R(44, 136, 340, 18), col::Muted());
+
+    {
+        // Force Borderless on / off for the selected game
+        const bool pick = selected_ >= 0 && selected_ < static_cast<int>(games_.size());
+        const bool on = pick && BorderIndex(games_[selected_].hwnd) >= 0;
+        const gp::RectF bb = R(310, 108, 94, 26);
+        const bool hotB = hover_ == kIdBorderless && pick;
+        FillRound(g, bb, S(8), on ? col::Alpha(col::Green(), 40) : (hotB ? col::RowHot() : col::Row()));
+        StrokeRound(g, bb, S(8), on ? col::Green() : (hotB ? col::Accent() : col::Line()), max(1.0f, S(1)));
+        Text(g, on ? L"Borderless: On" : L"Borderless: Off", *f_.chip, bb, pick ? (on ? col::Green() : col::Text()) : col::Muted(), 1);
+        if (pick)
+            AddHit(bb, kIdBorderless);
+    }
 
     {
         const gp::RectF btn = R(414, 114, 90, 30);
