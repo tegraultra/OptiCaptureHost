@@ -51,7 +51,7 @@ constexpr const wchar_t* kTelegramText = L"t.me/MKJH_APPS";
 constexpr const wchar_t* kHostExe = L"OptiCaptureHost.exe";
 constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host's overlay window class
 
-constexpr const wchar_t* kVersion = L"2.6.4";
+constexpr const wchar_t* kVersion = L"2.6.5";
 
 constexpr float kW = 796.0f; // client size in logical pixels (scaled by the DPI)
 constexpr float kH = 714.0f;
@@ -883,7 +883,7 @@ std::string OwnExeName()
 
 // The RTSS frame limiter. Only one profile is changed at a time; its old values are kept in the .ini and put back when
 // the limiter is switched off or moved to another target. hz = refresh rate of the game's monitor.
-LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& gameExe, int hz)
+LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& gameExe, int hz, bool off)
 {
     LimiterOut out;
     const std::wstring ini = oc::SettingsPath();
@@ -913,6 +913,42 @@ LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& g
         api.save(me.c_str());
         api.update();
         RtssLog(L"launcher profile \"" + std::wstring(me.begin(), me.end()) + L"\": overlay off");
+    }
+
+    // Off: set the limit of the profile that was limited, and of the profile the current choice points at, to 0.
+    if (off || st.limitTarget == 0)
+    {
+        std::vector<std::string> names;
+        if (GetPrivateProfileIntW(L"Rtss", L"Has", 0, ini.c_str()) != 0)
+        {
+            wchar_t prof[260] = {};
+            GetPrivateProfileStringW(L"Rtss", L"Profile", L"", prof, 260, ini.c_str());
+            names.push_back(Narrow(prof));
+        }
+        if (st.limitTarget == 1 && !gameExe.empty())
+            names.push_back(Narrow(gameExe));
+        else if (st.limitTarget == 2)
+            names.push_back(Narrow(kHostExe));
+        else if (st.limitTarget == 3)
+            names.push_back(std::string());
+        std::sort(names.begin(), names.end());
+        names.erase(std::unique(names.begin(), names.end()), names.end());
+
+        bool allOk = true;
+        for (const std::string& n : names)
+            allOk = api.Write(n, 0, 1, api.Read(n, "SyncLimiter", 0)) && allOk;
+        WritePrivateProfileStringW(L"Rtss", L"Has", L"0", ini.c_str());
+        out.info = L"Limiter off.";
+        if (allOk)
+        {
+            out.note = L"Frame limiter is off (limit set to 0).";
+        }
+        else
+        {
+            out.code = 1;
+            out.note = L"RTSS did not take the change.";
+        }
+        return out;
     }
 
     // 1) put back whatever an earlier Apply changed
@@ -1016,12 +1052,12 @@ LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& g
 
 // Runs this program again, elevated, to write the RTSS profile (RTSS often needs administrator rights for that), so the
 // launcher itself can stay a normal program (an elevated launcher breaks the shortcuts of the games it starts).
-LimiterOut RunLimiterElevated(const std::wstring& gameExe, int hz)
+LimiterOut RunLimiterElevated(const std::wstring& gameExe, int hz, bool off)
 {
     LimiterOut out;
     wchar_t self[MAX_PATH * 2] = {};
     GetModuleFileNameW(nullptr, self, MAX_PATH * 2);
-    const std::wstring args = L"--rtss-apply \"" + (gameExe.empty() ? std::wstring(L"-") : gameExe) + L"\" " + std::to_wstring(hz);
+    const std::wstring args = L"--rtss-apply \"" + (gameExe.empty() ? std::wstring(L"-") : gameExe) + L"\" " + std::to_wstring(hz) + (off ? L" off" : L"");
 
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof(sei);
@@ -1651,14 +1687,11 @@ void App::ApplyLimiter(bool off)
     }
     const int hz = RefreshRateOf(wnd);
 
-    oc::Settings use = st_;
-    if (off)
-        use.limitTarget = 0; // put the RTSS profile back and stop limiting
-    LimiterOut r = DoLimiter(rtss_, use, exe, hz);
+    LimiterOut r = DoLimiter(rtss_, st_, exe, hz, off);
     if (r.code == 1 && !IsElevated())
     {
         SetNote(L"RTSS needs administrator rights to write the limit - allow the Windows prompt.", Note::Info);
-        r = RunLimiterElevated(exe, hz);
+        r = RunLimiterElevated(exe, hz, off);
     }
 
     if (r.code == 2)
@@ -3048,12 +3081,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
         {
             const std::wstring exe = wcscmp(argv[2], L"-") == 0 ? std::wstring() : std::wstring(argv[2]);
             const int hz = _wtoi(argv[3]);
+            const bool offArg = argc >= 5 && wcscmp(argv[4], L"off") == 0;
             LocalFree(argv);
 
             oc::Settings st;
             oc::LoadSettings(st);
             RtssApi api;
-            const LimiterOut r = DoLimiter(api, st, exe, hz > 1 ? hz : 60);
+            const LimiterOut r = DoLimiter(api, st, exe, hz > 1 ? hz : 60, offArg);
             WritePrivateProfileStringW(L"Rtss", L"LastInfo", r.info.c_str(), oc::SettingsPath().c_str());
             WritePrivateProfileStringW(L"Rtss", L"LastNote", r.note.c_str(), oc::SettingsPath().c_str());
             return r.code;
