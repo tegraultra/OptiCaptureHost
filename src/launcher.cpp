@@ -51,7 +51,7 @@ constexpr const wchar_t* kTelegramText = L"t.me/MKJH_APPS";
 constexpr const wchar_t* kHostExe = L"OptiCaptureHost.exe";
 constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host's overlay window class
 
-constexpr const wchar_t* kVersion = L"2.6.0";
+constexpr const wchar_t* kVersion = L"2.6.1";
 
 constexpr float kW = 796.0f; // client size in logical pixels (scaled by the DPI)
 constexpr float kH = 690.0f;
@@ -846,6 +846,197 @@ int RefreshRateOf(HWND wnd)
     return 60;
 }
 
+// Result of one limiter run.
+struct LimiterOut
+{
+    int code = 0;       // 0 done, 1 RTSS did not take it (needs administrator rights / RTSS not ready), 2 RTSS not installed, 3 bad input
+    std::wstring info;  // short text under the Apply button
+    std::wstring note;  // status line
+};
+
+bool IsElevated()
+{
+    HANDLE tok = nullptr;
+    bool r = false;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok))
+    {
+        TOKEN_ELEVATION te{};
+        DWORD n = 0;
+        if (GetTokenInformation(tok, TokenElevation, &te, sizeof(te), &n))
+            r = te.TokenIsElevated != 0;
+        CloseHandle(tok);
+    }
+    return r;
+}
+
+// Base name of this program (RTSS profile name of the launcher itself).
+std::string OwnExeName()
+{
+    wchar_t path[MAX_PATH * 2] = {};
+    GetModuleFileNameW(nullptr, path, MAX_PATH * 2);
+    std::wstring w = path;
+    const size_t cut = w.find_last_of(L"\\/");
+    return Narrow(cut == std::wstring::npos ? w : w.substr(cut + 1));
+}
+
+// The RTSS frame limiter. Only one profile is changed at a time; its old values are kept in the .ini and put back when
+// the limiter is switched off or moved to another target. hz = refresh rate of the game's monitor.
+LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& gameExe, int hz)
+{
+    LimiterOut out;
+    const std::wstring ini = oc::SettingsPath();
+    const std::wstring dir = RtssInstallDir();
+    RtssLog(L"apply: RTSS folder \"" + dir + L"\", running folder \"" + RtssDir() + L"\", elevated " + std::to_wstring(IsElevated()));
+
+    if (dir.empty() || !api.Open(dir))
+    {
+        RtssLog(L"RTSS missing or RTSSHooks64.dll could not be loaded (error " + std::to_wstring(GetLastError()) + L")");
+        if (st.limitTarget != 0)
+        {
+            out.code = 2;
+            out.note = L"RivaTuner (RTSS) is not installed.";
+            return out;
+        }
+        out.info = L"Limiter off.";
+        out.note = L"Frame limiter is off.";
+        return out;
+    }
+
+    // the launcher itself must not get the RTSS on-screen display (it would draw over the launcher)
+    {
+        const std::string me = OwnExeName();
+        api.load(me.c_str());
+        DWORD zero = 0;
+        api.set("EnableOSD", reinterpret_cast<LPBYTE>(&zero), sizeof(zero));
+        api.save(me.c_str());
+        api.update();
+        RtssLog(L"launcher profile \"" + std::wstring(me.begin(), me.end()) + L"\": overlay off");
+    }
+
+    // 1) put back whatever an earlier Apply changed
+    if (GetPrivateProfileIntW(L"Rtss", L"Has", 0, ini.c_str()) != 0)
+    {
+        wchar_t prof[260] = {};
+        GetPrivateProfileStringW(L"Rtss", L"Profile", L"", prof, 260, ini.c_str());
+        const int oLimit = GetPrivateProfileIntW(L"Rtss", L"OrigLimit", 0, ini.c_str());
+        const int oDen = GetPrivateProfileIntW(L"Rtss", L"OrigDen", 1, ini.c_str());
+        const int oSync = GetPrivateProfileIntW(L"Rtss", L"OrigSync", 0, ini.c_str());
+        api.Write(Narrow(prof), oLimit, oDen < 1 ? 1 : oDen, oSync);
+        WritePrivateProfileStringW(L"Rtss", L"Has", L"0", ini.c_str());
+    }
+
+    if (st.limitTarget == 0)
+    {
+        out.info = L"Limiter off.";
+        out.note = L"Frame limiter is off.";
+        return out;
+    }
+
+    // 2) which profile
+    std::wstring profile; // empty = Global
+    if (st.limitTarget == 1)
+    {
+        if (gameExe.empty())
+        {
+            out.code = 3;
+            out.note = L"Pick a game in the list first (the limiter is set for its .exe).";
+            return out;
+        }
+        profile = gameExe;
+    }
+    else if (st.limitTarget == 2)
+    {
+        profile = kHostExe;
+    }
+
+    // 3) which number: limit = num / den (half of 75 Hz is exactly 37.5 = 75 / 2)
+    int num = st.limitFps, den = 1;
+    if (st.limitFps == 0)
+        num = hz;
+    else if (st.limitFps == -2)
+    {
+        if (hz % 2 == 0)
+            num = hz / 2;
+        else
+        {
+            num = hz;
+            den = 2;
+        }
+    }
+    if (num < 1)
+        num = 30;
+
+    const std::string name = Narrow(profile);
+    const int oLimit = api.Read(name, "FramerateLimit", 0);
+    const int oDen = api.Read(name, "FramerateLimitDenominator", 1);
+    const int oSync = api.Read(name, "SyncLimiter", 0);
+    WritePrivateProfileStringW(L"Rtss", L"Profile", profile.c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"Rtss", L"OrigLimit", std::to_wstring(oLimit).c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"Rtss", L"OrigDen", std::to_wstring(oDen).c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"Rtss", L"OrigSync", std::to_wstring(oSync).c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"Rtss", L"Has", L"1", ini.c_str());
+
+    static const wchar_t* const modeNames[] = { L"async", L"front edge sync", L"back edge sync" };
+    const int mode = (st.limitMode >= 0 && st.limitMode <= 2) ? st.limitMode : 1;
+    const std::wstring who = profile.empty() ? std::wstring(L"Global") : profile;
+    if (!api.Write(name, num, den, mode))
+    {
+        WritePrivateProfileStringW(L"Rtss", L"Has", L"0", ini.c_str());
+        out.code = 1;
+        out.info = L"RTSS did not accept the change.";
+        out.note = L"RTSS did not take the limit.";
+        return out;
+    }
+
+    std::wstring fpsText = std::to_wstring(num);
+    if (den == 2)
+        fpsText = std::to_wstring(num / 2) + L".5";
+    out.info = who + L" - " + fpsText + L" fps - " + modeNames[mode];
+    out.note = L"RTSS limit set: " + who + L" at " + fpsText + L" fps (" + modeNames[mode] + L")." +
+               (RtssDir().empty() ? L" RTSS is not running - start it before the game." : L"");
+    return out;
+}
+
+// Runs this program again, elevated, to write the RTSS profile (RTSS often needs administrator rights for that), so the
+// launcher itself can stay a normal program (an elevated launcher breaks the shortcuts of the games it starts).
+LimiterOut RunLimiterElevated(const std::wstring& gameExe, int hz)
+{
+    LimiterOut out;
+    wchar_t self[MAX_PATH * 2] = {};
+    GetModuleFileNameW(nullptr, self, MAX_PATH * 2);
+    const std::wstring args = L"--rtss-apply \"" + (gameExe.empty() ? std::wstring(L"-") : gameExe) + L"\" " + std::to_wstring(hz);
+
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";
+    sei.lpFile = self;
+    sei.lpParameters = args.c_str();
+    sei.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&sei) || !sei.hProcess)
+    {
+        out.code = 1;
+        out.info = L"Administrator permission was not given.";
+        out.note = L"RTSS needs administrator rights to take the limit. Press Apply again and allow it.";
+        return out;
+    }
+    WaitForSingleObject(sei.hProcess, 60000);
+    DWORD code = 1;
+    GetExitCodeProcess(sei.hProcess, &code);
+    CloseHandle(sei.hProcess);
+
+    const std::wstring ini = oc::SettingsPath();
+    wchar_t buf[512] = {};
+    GetPrivateProfileStringW(L"Rtss", L"LastInfo", L"", buf, 512, ini.c_str());
+    out.info = buf;
+    GetPrivateProfileStringW(L"Rtss", L"LastNote", L"", buf, 512, ini.c_str());
+    out.note = buf;
+    out.code = static_cast<int>(code);
+    if (out.note.empty())
+        out.note = L"RTSS did not take the limit. Is RTSS running?";
+    return out;
+}
+
 class App
 {
   public:
@@ -1430,113 +1621,35 @@ void App::OpenNextDialog()
     Invalidate();
 }
 
-// The RTSS frame limiter (async mode). Only one profile is changed at a time; its old values are kept in the .ini and
-// put back when the limiter is switched off or moved to another target.
 void App::ApplyLimiter()
 {
-    const std::wstring ini = oc::SettingsPath();
-
-    if (st_.limitTarget != 0)
-    {
-        const std::wstring dir = RtssInstallDir();
-        RtssLog(L"apply: RTSS folder \"" + dir + L"\", running folder \"" + RtssDir() + L"\"");
-        if (dir.empty() || !rtss_.Open(dir))
-        {
-            RtssLog(L"RTSS missing or RTSSHooks64.dll could not be loaded (error " + std::to_wstring(GetLastError()) + L")");
-            shownWarn_[kWarnRtssMissing] = false;
-            RaiseWarning(kWarnRtssMissing,
-                         L"The frame limiter uses RivaTuner Statistics Server (RTSS), and it was not found on this PC.\n\n"
-                         L"Install RTSS (it comes with MSI Afterburner, or from guru3d.com), start it, then press Apply again.\n\n"
-                         L"RTSS must be running while you play: it does the actual limiting.");
-            SetNote(L"RivaTuner (RTSS) is not installed.", Note::Error);
-            return;
-        }
-    }
-    else if (!rtss_.mod)
-    {
-        const std::wstring dir = RtssInstallDir();
-        if (!dir.empty())
-            rtss_.Open(dir);
-    }
-
-    // 1) put back whatever an earlier Apply changed
-    if (GetPrivateProfileIntW(L"Rtss", L"Has", 0, ini.c_str()) != 0 && rtss_.mod)
-    {
-        wchar_t prof[260] = {};
-        GetPrivateProfileStringW(L"Rtss", L"Profile", L"", prof, 260, ini.c_str());
-        const std::string name = Narrow(prof);
-        const int oLimit = GetPrivateProfileIntW(L"Rtss", L"OrigLimit", 0, ini.c_str());
-        const int oDen = GetPrivateProfileIntW(L"Rtss", L"OrigDen", 1, ini.c_str());
-        const int oSync = GetPrivateProfileIntW(L"Rtss", L"OrigSync", 0, ini.c_str());
-        rtss_.Write(name, oLimit, oDen < 1 ? 1 : oDen, oSync);
-        WritePrivateProfileStringW(L"Rtss", L"Has", L"0", ini.c_str());
-    }
-
-    if (st_.limitTarget == 0)
-    {
-        limitInfo_ = L"Limiter off.";
-        SetNote(L"Frame limiter is off.", Note::Ok);
-        return;
-    }
-
-    // 2) which profile
-    std::wstring profile; // empty = Global
+    std::wstring exe;
     HWND wnd = nullptr;
-    if (st_.limitTarget == 1)
+    if (selected_ >= 0 && selected_ < static_cast<int>(games_.size()))
     {
-        if (selected_ < 0 || selected_ >= static_cast<int>(games_.size()) || games_[selected_].exe.empty())
-        {
-            SetNote(L"Pick a game in the list first (the limiter is set for its .exe).", Note::Error);
-            return;
-        }
-        profile = games_[selected_].exe;
+        exe = games_[selected_].exe;
         wnd = games_[selected_].hwnd;
     }
-    else if (st_.limitTarget == 2)
-    {
-        profile = kHostExe;
-    }
-    else
-    {
-        if (selected_ >= 0 && selected_ < static_cast<int>(games_.size()))
-            wnd = games_[selected_].hwnd;
-    }
+    const int hz = RefreshRateOf(wnd);
 
-    // 3) which number
-    int fps = st_.limitFps;
-    if (fps == 0)
-        fps = RefreshRateOf(wnd);
-    else if (fps == -2)
-        fps = RefreshRateOf(wnd) / 2;
-    if (fps < 1)
-        fps = 30;
-
-    const std::string name = Narrow(profile);
-    const int oLimit = rtss_.Read(name, "FramerateLimit", 0);
-    const int oDen = rtss_.Read(name, "FramerateLimitDenominator", 1);
-    const int oSync = rtss_.Read(name, "SyncLimiter", 0);
-    WritePrivateProfileStringW(L"Rtss", L"Profile", profile.c_str(), ini.c_str());
-    WritePrivateProfileStringW(L"Rtss", L"OrigLimit", std::to_wstring(oLimit).c_str(), ini.c_str());
-    WritePrivateProfileStringW(L"Rtss", L"OrigDen", std::to_wstring(oDen).c_str(), ini.c_str());
-    WritePrivateProfileStringW(L"Rtss", L"OrigSync", std::to_wstring(oSync).c_str(), ini.c_str());
-    WritePrivateProfileStringW(L"Rtss", L"Has", L"1", ini.c_str());
-
-    const std::wstring who = profile.empty() ? std::wstring(L"Global") : profile;
-    static const wchar_t* const modeNames[] = { L"async", L"front edge sync", L"back edge sync" };
-    const int mode = (st_.limitMode >= 0 && st_.limitMode <= 2) ? st_.limitMode : 1;
-    if (!rtss_.Write(name, fps, 1, mode))
+    LimiterOut r = DoLimiter(rtss_, st_, exe, hz);
+    if (r.code == 1 && !IsElevated())
     {
-        WritePrivateProfileStringW(L"Rtss", L"Has", L"0", ini.c_str());
-        limitInfo_ = L"RTSS did not accept the change.";
-        SetNote(L"RTSS did not take the limit. Start RTSS, or run this launcher as administrator, then press Apply again.", Note::Error);
-        return;
+        SetNote(L"RTSS needs administrator rights to write the limit - allow the Windows prompt.", Note::Info);
+        r = RunLimiterElevated(exe, hz);
     }
 
-    limitInfo_ = who + L" · " + std::to_wstring(fps) + L" fps · " + modeNames[mode];
-    const bool on = RtssDir().empty() == false;
-    SetNote(L"RTSS limit set: " + who + L" at " + std::to_wstring(fps) + L" fps (" + modeNames[mode] + L")." +
-                (on ? L"" : L" RTSS is not running - start it before the game."),
-            on ? Note::Ok : Note::Info);
+    if (r.code == 2)
+    {
+        shownWarn_[kWarnRtssMissing] = false;
+        RaiseWarning(kWarnRtssMissing,
+                     L"The frame limiter uses RivaTuner Statistics Server (RTSS), and it was not found on this PC.\n\n"
+                     L"Install RTSS (it comes with MSI Afterburner, or from guru3d.com), start it, then press Apply again.\n\n"
+                     L"RTSS must be running while you play: it does the actual limiting.");
+    }
+    if (!r.info.empty())
+        limitInfo_ = r.info;
+    SetNote(r.note, r.code == 0 ? Note::Ok : Note::Error);
 }
 
 void App::CloseDialog(bool accepted)
@@ -2870,6 +2983,28 @@ void App::Paint(HDC dc, int W, int H)
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+    // Helper mode: the launcher started itself elevated only to write the RTSS profile.
+    {
+        int argc = 0;
+        wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv && argc >= 4 && wcscmp(argv[1], L"--rtss-apply") == 0)
+        {
+            const std::wstring exe = wcscmp(argv[2], L"-") == 0 ? std::wstring() : std::wstring(argv[2]);
+            const int hz = _wtoi(argv[3]);
+            LocalFree(argv);
+
+            oc::Settings st;
+            oc::LoadSettings(st);
+            RtssApi api;
+            const LimiterOut r = DoLimiter(api, st, exe, hz > 1 ? hz : 60);
+            WritePrivateProfileStringW(L"Rtss", L"LastInfo", r.info.c_str(), oc::SettingsPath().c_str());
+            WritePrivateProfileStringW(L"Rtss", L"LastNote", r.note.c_str(), oc::SettingsPath().c_str());
+            return r.code;
+        }
+        if (argv)
+            LocalFree(argv);
+    }
 
     // One launcher at a time: a second start brings the first one forward.
     HANDLE once = CreateMutexW(nullptr, TRUE, L"Local\\OptiCaptureLauncher.SingleInstance");
