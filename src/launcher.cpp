@@ -51,10 +51,10 @@ constexpr const wchar_t* kTelegramText = L"t.me/MKJH_APPS";
 constexpr const wchar_t* kHostExe = L"OptiCaptureHost.exe";
 constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host's overlay window class
 
-constexpr const wchar_t* kVersion = L"2.6.2";
+constexpr const wchar_t* kVersion = L"2.6.4";
 
 constexpr float kW = 796.0f; // client size in logical pixels (scaled by the DPI)
-constexpr float kH = 690.0f;
+constexpr float kH = 714.0f;
 
 constexpr UINT_PTR kTimerList = 1;
 constexpr UINT_PTR kTimerHost = 2;
@@ -82,6 +82,8 @@ constexpr int kIdLimitFps = 16;
 constexpr int kIdLimitApply = 17;
 constexpr int kIdDelaySelect = 18;
 constexpr int kIdLimitMode = 19;
+constexpr int kIdLimitAuto = 24;
+constexpr int kIdLimitOff = 25;
 constexpr int kLimitModeMenuBase = 5800;
 constexpr int kLimitTargetMenuBase = 5500;
 constexpr int kLimitFpsMenuBase = 5600;
@@ -953,14 +955,22 @@ LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& g
     int num = st.limitFps, den = 1;
     if (st.limitFps == 0)
         num = hz;
-    else if (st.limitFps == -2)
+    else if (st.limitFps <= -2 && st.limitFps >= -4)
     {
-        if (hz % 2 == 0)
-            num = hz / 2;
-        else
+        // refresh / 2, / 3 or / 4 as an exact fraction (75 Hz / 2 = 75/2 = 37.5, 75 Hz / 3 = 25)
+        num = hz;
+        den = -st.limitFps;
+        int a = num, b = den;
+        while (b != 0)
         {
-            num = hz;
-            den = 2;
+            const int t = a % b;
+            a = b;
+            b = t;
+        }
+        if (a > 1)
+        {
+            num /= a;
+            den /= a;
         }
     }
     if (num < 1)
@@ -988,9 +998,16 @@ LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& g
         return out;
     }
 
-    std::wstring fpsText = std::to_wstring(num);
-    if (den == 2)
-        fpsText = std::to_wstring(num / 2) + L".5";
+    std::wstring fpsText;
+    {
+        wchar_t tb[32];
+        swprintf(tb, 32, L"%.2f", static_cast<double>(num) / static_cast<double>(den));
+        fpsText = tb;
+        while (!fpsText.empty() && fpsText.back() == L'0')
+            fpsText.pop_back();
+        if (!fpsText.empty() && fpsText.back() == L'.')
+            fpsText.pop_back();
+    }
     out.info = who + L" - " + fpsText + L" fps - " + modeNames[mode];
     out.note = L"RTSS limit set: " + who + L" at " + fpsText + L" fps (" + modeNames[mode] + L")." +
                (RtssDir().empty() ? L" RTSS is not running - start it before the game." : L"");
@@ -1089,7 +1106,7 @@ class App
 
     void Refresh();
     void ClampScroll();
-    gp::RectF ListView() const { return R(36, 164, 476, 384); }
+    gp::RectF ListView() const { return R(36, 164, 476, 412); }
 
     void OnClick(int id);
     LRESULT OnCaptureKey(UINT vk);
@@ -1109,7 +1126,7 @@ class App
 
     // live status + warnings
     void LoadWarnFlags();
-    void ApplyLimiter();
+    void ApplyLimiter(bool off = false);
     RtssApi rtss_;
     std::wstring limitInfo_; // what the limiter has applied (shown under the Apply button)
     void RaiseWarning(int kind, const std::wstring& text);
@@ -1452,6 +1469,8 @@ void App::Start()
     startConfirmed_ = false;
 
     Save();
+    if (st_.limitAuto)
+        ApplyLimiter(); // RTSS profile first, so the limit is already in place when the game runs
     WriteOptiScalerKeys(st_);
 
     if (IsIconic(game.hwnd))
@@ -1621,7 +1640,7 @@ void App::OpenNextDialog()
     Invalidate();
 }
 
-void App::ApplyLimiter()
+void App::ApplyLimiter(bool off)
 {
     std::wstring exe;
     HWND wnd = nullptr;
@@ -1632,7 +1651,10 @@ void App::ApplyLimiter()
     }
     const int hz = RefreshRateOf(wnd);
 
-    LimiterOut r = DoLimiter(rtss_, st_, exe, hz);
+    oc::Settings use = st_;
+    if (off)
+        use.limitTarget = 0; // put the RTSS profile back and stop limiting
+    LimiterOut r = DoLimiter(rtss_, use, exe, hz);
     if (r.code == 1 && !IsElevated())
     {
         SetNote(L"RTSS needs administrator rights to write the limit - allow the Windows prompt.", Note::Info);
@@ -2172,22 +2194,36 @@ void App::OnClick(int id)
         if (menu)
         {
             AppendMenuW(menu, MF_STRING | (st_.limitFps == 0 ? MF_CHECKED : 0), kLimitFpsMenuBase + 0, L"Refresh rate  (auto)");
-            AppendMenuW(menu, MF_STRING | (st_.limitFps == -2 ? MF_CHECKED : 0), kLimitFpsMenuBase + 1, L"Half refresh rate  (auto)");
+            AppendMenuW(menu, MF_STRING | (st_.limitFps == -2 ? MF_CHECKED : 0), kLimitFpsMenuBase + 1, L"1/2 refresh rate  (auto)");
+            AppendMenuW(menu, MF_STRING | (st_.limitFps == -3 ? MF_CHECKED : 0), kLimitFpsMenuBase + 2, L"1/3 refresh rate  (auto)");
+            AppendMenuW(menu, MF_STRING | (st_.limitFps == -4 ? MF_CHECKED : 0), kLimitFpsMenuBase + 3, L"1/4 refresh rate  (auto)");
             for (int i = 0; i < static_cast<int>(sizeof(fpsList) / sizeof(fpsList[0])); ++i)
-                AppendMenuW(menu, MF_STRING | (st_.limitFps == fpsList[i] ? MF_CHECKED : 0), kLimitFpsMenuBase + 2 + i,
+                AppendMenuW(menu, MF_STRING | (st_.limitFps == fpsList[i] ? MF_CHECKED : 0), kLimitFpsMenuBase + 4 + i,
                             (std::to_wstring(fpsList[i]) + L" fps").c_str());
             POINT pt{};
             GetCursorPos(&pt);
             const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
             DestroyMenu(menu);
-            if (cmd >= static_cast<UINT>(kLimitFpsMenuBase) && cmd < static_cast<UINT>(kLimitFpsMenuBase + 2 + 14))
+            if (cmd >= static_cast<UINT>(kLimitFpsMenuBase) && cmd < static_cast<UINT>(kLimitFpsMenuBase + 4 + 14))
             {
                 const int k = static_cast<int>(cmd - kLimitFpsMenuBase);
-                st_.limitFps = k == 0 ? 0 : (k == 1 ? -2 : fpsList[k - 2]);
+                st_.limitFps = k == 0 ? 0 : (k <= 3 ? -(k + 1) : fpsList[k - 4]);
                 Save();
                 SetNote(L"Press Apply to use the limiter setting.", Note::Info);
             }
         }
+    }
+    else if (id == kIdLimitAuto)
+    {
+        st_.limitAuto = st_.limitAuto ? 0 : 1;
+        Save();
+        SetNote(st_.limitAuto ? L"The limiter will be applied every time you press START." : L"The limiter is applied only with the Apply button.", Note::Ok);
+    }
+    else if (id == kIdLimitOff)
+    {
+        st_.limitAuto = 0; // otherwise START would switch it on again
+        Save();
+        ApplyLimiter(true);
     }
     else if (id == kIdLimitApply)
     {
@@ -2597,7 +2633,7 @@ void App::Paint(HDC dc, int W, int H)
     }
 
     // ---- games card ----
-    const gp::RectF left = R(24, 100, 500, 604);
+    const gp::RectF left = R(24, 100, 500, 632);
     Card(g, left);
     Text(g, L"Choose a game", *f_.h2, R(44, 112, 300, 24), col::Text());
     Text(g, L"Pick the window of the game you want to enhance", *f_.sm, R(44, 136, 340, 18), col::Muted());
@@ -2699,13 +2735,13 @@ void App::Paint(HDC dc, int W, int H)
     {
         static const wchar_t* boostNames[] = { L"Off  (weak GPUs)", L"Light  (CPU priority)", L"Balanced  (CPU + GPU high)", L"Max  (strong GPUs)" };
 
-        Text(g, L"Performance", *f_.bodyB, R(44, 558, 130, 24), col::Text());
+        Text(g, L"Performance", *f_.bodyB, R(44, 586, 130, 24), col::Text());
 
-        const gp::RectF selector = R(176, 554, 328, 32);
+        const gp::RectF selector = R(176, 582, 328, 32);
         const bool hot = hover_ == kIdBoostSelect;
         FillRound(g, selector, S(8), hot ? col::RowHot() : col::Row());
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
-        Text(g, boostNames[(st_.boost >= 0 && st_.boost <= 3) ? st_.boost : 3], *f_.chip, R(186, 560, 308, 22), col::Text());
+        Text(g, boostNames[(st_.boost >= 0 && st_.boost <= 3) ? st_.boost : 3], *f_.chip, R(186, 588, 308, 22), col::Text());
         AddHit(selector, kIdBoostSelect);
     }
 
@@ -2713,32 +2749,32 @@ void App::Paint(HDC dc, int W, int H)
     {
         static const wchar_t* presentNames[] = { L"Auto  (recommended)", L"Always no wait  (interval 0)", L"Always wait for vblank  (interval 1)", L"Classic  (like 2.2.0)", L"Lossless-style  (low latency)", L"Classic + half refresh" };
 
-        Text(g, L"Present mode", *f_.bodyB, R(44, 600, 130, 24), col::Text());
+        Text(g, L"Present mode", *f_.bodyB, R(44, 628, 130, 24), col::Text());
 
-        const gp::RectF selector = R(176, 596, 328, 32);
+        const gp::RectF selector = R(176, 624, 328, 32);
         const bool hot = hover_ == kIdPresentSelect;
         FillRound(g, selector, S(8), hot ? col::RowHot() : col::Row());
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
-        Text(g, presentNames[(st_.presentMode >= 0 && st_.presentMode <= 5) ? st_.presentMode : 0], *f_.chip, R(186, 602, 308, 22), col::Text());
+        Text(g, presentNames[(st_.presentMode >= 0 && st_.presentMode <= 5) ? st_.presentMode : 0], *f_.chip, R(186, 630, 308, 22), col::Text());
         AddHit(selector, kIdPresentSelect);
     }
 
     // ---- present delay selector ----
     {
-        Text(g, L"Present delay", *f_.bodyB, R(44, 642, 130, 24), col::Text());
+        Text(g, L"Present delay", *f_.bodyB, R(44, 670, 130, 24), col::Text());
 
-        const gp::RectF selector = R(176, 638, 328, 32);
+        const gp::RectF selector = R(176, 666, 328, 32);
         const bool hot = hover_ == kIdDelaySelect;
         FillRound(g, selector, S(8), hot ? col::RowHot() : col::Row());
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
         std::wstring t = std::to_wstring(st_.presentDelay) + L" ms";
         if (st_.presentDelay == 0) t += L"  (off)";
         else if (st_.presentDelay == 3) t += L"  (recommended)";
-        Text(g, t, *f_.chip, R(186, 644, 308, 22), col::Text());
+        Text(g, t, *f_.chip, R(186, 672, 308, 22), col::Text());
         AddHit(selector, kIdDelaySelect);
     }
 
-    Text(g, L"Tip: run the game in Borderless or Windowed mode, not Exclusive Fullscreen.", *f_.tiny, R(44, 678, 460, 22),
+    Text(g, L"Tip: run the game in Borderless or Windowed mode, not Exclusive Fullscreen.", *f_.tiny, R(44, 706, 460, 22),
          col::Muted(), 0, true);
 
     // ---- VSync card ----
@@ -2765,7 +2801,7 @@ void App::Paint(HDC dc, int W, int H)
     {
         static const wchar_t* targetNames[] = { L"Off", L"Game", L"Host", L"Global" };
         static const wchar_t* modeShort[] = { L"Async", L"Front edge sync", L"Back edge sync" };
-        const gp::RectF c = R(540, 204, 372, 136);
+        const gp::RectF c = R(540, 204, 372, 164);
         Card(g, c);
         Text(g, L"Frame limiter  ·  RivaTuner", *f_.h2, R(560, 214, 340, 24), col::Text());
 
@@ -2786,7 +2822,9 @@ void App::Paint(HDC dc, int W, int H)
 
         std::wstring fpsText;
         if (st_.limitFps == 0) fpsText = L"Refresh rate  (auto)";
-        else if (st_.limitFps == -2) fpsText = L"Half refresh  (auto)";
+        else if (st_.limitFps == -2) fpsText = L"1/2 refresh  (auto)";
+        else if (st_.limitFps == -3) fpsText = L"1/3 refresh  (auto)";
+        else if (st_.limitFps == -4) fpsText = L"1/4 refresh  (auto)";
         else fpsText = std::to_wstring(st_.limitFps) + L" fps";
         const gp::RectF f = R(560, 284, 230, 30);
         const bool hotF = hover_ == kIdLimitFps;
@@ -2795,29 +2833,46 @@ void App::Paint(HDC dc, int W, int H)
         Text(g, fpsText, *f_.chip, R(568, 290, 214, 22), col::Text());
         AddHit(f, kIdLimitFps);
 
-        const gp::RectF apply = R(800, 284, 92, 30);
+        const gp::RectF apply = R(800, 284, 48, 30);
         const bool hotA = hover_ == kIdLimitApply;
         FillRound(g, apply, S(8), hotA ? col::Accent2() : col::Accent());
         StrokeRound(g, apply, S(8), col::Line(), max(1.0f, S(1)));
         Text(g, L"Apply", *f_.chip, apply, col::White(), 1);
         AddHit(apply, kIdLimitApply);
 
-        Text(g, limitInfo_.empty() ? std::wstring(L"Needs RivaTuner Statistics Server. Apply before you start the game.") : limitInfo_,
-             *f_.tiny, R(560, 320, 332, 14), col::Muted());
+        const gp::RectF offb = R(852, 284, 40, 30);
+        const bool hotO = hover_ == kIdLimitOff;
+        FillRound(g, offb, S(8), hotO ? col::RowHot() : col::Row());
+        StrokeRound(g, offb, S(8), hotO ? col::Accent() : col::Line(), max(1.0f, S(1)));
+        Text(g, L"Off", *f_.chip, offb, col::Text(), 1);
+        AddHit(offb, kIdLimitOff);
+
+        {
+            const gp::RectF box = R(560, 324, 18, 18);
+            const bool hot = hover_ == kIdLimitAuto;
+            FillRound(g, box, S(5), st_.limitAuto ? col::Accent() : col::Row());
+            StrokeRound(g, box, S(5), hot ? col::Accent2() : col::Line(), max(1.0f, S(1)));
+            if (st_.limitAuto)
+                Text(g, L"\u2713", *f_.chip, box, col::White(), 1);
+            Text(g, L"Apply automatically when the game starts", *f_.body, R(586, 322, 306, 22), col::Text());
+            AddHit(R(560, 320, 332, 26), kIdLimitAuto);
+        }
+        Text(g, limitInfo_.empty() ? std::wstring(L"Needs RivaTuner Statistics Server (async / front / back edge sync).") : limitInfo_,
+             *f_.tiny, R(560, 348, 332, 14), col::Muted());
     }
 
     // ---- shortcuts card ----
     {
-        const gp::RectF c = R(540, 352, 372, 366);
+        const gp::RectF c = R(540, 380, 372, 366);
         Card(g, c);
-        Text(g, L"Shortcuts", *f_.h2, R(560, 482, 200, 24), col::Text());
+        Text(g, L"Shortcuts", *f_.h2, R(560, 510, 200, 24), col::Text());
 
-        const gp::RectF reset = R(822, 482, 70, 24);
+        const gp::RectF reset = R(822, 510, 70, 24);
         Text(g, L"Reset", hover_ == kIdReset ? *f_.link : *f_.linkN, reset, hover_ == kIdReset ? col::Accent2() : col::Muted(), 2);
         AddHit(reset, kIdReset);
 
         // brings back the warnings that were hidden with "Don't show this warning again"
-        const gp::RectF warnReset = R(640, 482, 170, 24);
+        const gp::RectF warnReset = R(640, 510, 170, 24);
         Text(g, L"Show warnings again", hover_ == kIdWarnReset ? *f_.link : *f_.linkN, warnReset,
              hover_ == kIdWarnReset ? col::Accent2() : col::Muted(), 2);
         AddHit(warnReset, kIdWarnReset);
@@ -2832,20 +2887,20 @@ void App::Paint(HDC dc, int W, int H)
             };
 
             Text(g, L"Frame Generation", *f_.bodyB,
-                R(560, 358, 230, 24), col::Text());
+                R(560, 386, 230, 24), col::Text());
 
-            const gp::RectF selector = R(560, 384, 230, 30);
+            const gp::RectF selector = R(560, 412, 230, 30);
             const bool selectorHot = hover_ == kIdFrameGenSelect && !locked;
             FillRound(g, selector, S(8), selectorHot ? col::RowHot() : col::Row());
             StrokeRound(g, selector, S(8),
                 selectorHot ? col::Accent() : col::Line(), max(1.0f, S(1)));
             Text(g, fgNames[(st_.frameGenMode >= 0 && st_.frameGenMode <= 3)
                 ? st_.frameGenMode : 0], *f_.chip,
-                R(568, 390, 214, 22), locked ? col::Muted() : col::Text());
+                R(568, 418, 214, 22), locked ? col::Muted() : col::Text());
             if (!locked)
                 AddHit(selector, kIdFrameGenSelect);
 
-            const gp::RectF apply = R(800, 384, 92, 30);
+            const gp::RectF apply = R(800, 412, 92, 30);
             const bool applyHot = hover_ == kIdFrameGenApply && !locked;
             FillRound(g, apply, S(8), applyHot ? col::Accent2() : col::Accent());
             StrokeRound(g, apply, S(8), col::Line(), max(1.0f, S(1)));
@@ -2863,20 +2918,20 @@ void App::Paint(HDC dc, int W, int H)
             };
 
             Text(g, L"Upscaler", *f_.bodyB,
-                R(560, 420, 230, 24), col::Text());
+                R(560, 448, 230, 24), col::Text());
 
-            const gp::RectF selector = R(560, 444, 230, 30);
+            const gp::RectF selector = R(560, 472, 230, 30);
             const bool selectorHot = hover_ == kIdUpscalerSelect && !locked;
             FillRound(g, selector, S(8), selectorHot ? col::RowHot() : col::Row());
             StrokeRound(g, selector, S(8),
                 selectorHot ? col::Accent() : col::Line(), max(1.0f, S(1)));
             Text(g, upscalerNames[(st_.upscalerMode >= 0 && st_.upscalerMode <= 2)
                 ? st_.upscalerMode : 0], *f_.chip,
-                R(568, 450, 214, 22), locked ? col::Muted() : col::Text());
+                R(568, 478, 214, 22), locked ? col::Muted() : col::Text());
             if (!locked)
                 AddHit(selector, kIdUpscalerSelect);
 
-            const gp::RectF apply = R(800, 444, 92, 30);
+            const gp::RectF apply = R(800, 472, 92, 30);
             const bool applyHot = hover_ == kIdUpscalerApply && !locked;
             FillRound(g, apply, S(8), applyHot ? col::Accent2() : col::Accent());
             StrokeRound(g, apply, S(8), col::Line(), max(1.0f, S(1)));
@@ -2885,7 +2940,7 @@ void App::Paint(HDC dc, int W, int H)
                 AddHit(apply, kIdUpscalerApply);
         }
 
-        float y = 508.0f;
+        float y = 536.0f;
         for (int i = 0; i < kScCount; ++i, y += 30.0f)
         {
             if (i > 0)
@@ -2923,28 +2978,28 @@ void App::Paint(HDC dc, int W, int H)
     // ---- footer ----
     {
         gp::Pen line(col::Line(), max(1.0f, S(1)));
-        g.DrawLine(&line, S(24), S(728), S(912), S(728));
+        g.DrawLine(&line, S(24), S(756), S(912), S(756));
 
-        Text(g, L"by", *f_.body, R(24, 744, 24, 22), col::Muted());
-        Text(g, L"MK-JH", *f_.bodyB, R(44, 744, 120, 22), col::Accent());
+        Text(g, L"by", *f_.body, R(24, 772, 24, 22), col::Muted());
+        Text(g, L"MK-JH", *f_.bodyB, R(44, 772, 120, 22), col::Accent());
 
         // Three clickable Telegram links.
         {
             const bool hotJH = hover_ == kIdLinkJH;
-            DrawPlane(g, R(24, 770, 22, 22));
+            DrawPlane(g, R(24, 798, 22, 22));
             Text(g, L"MK-JH", hotJH ? *f_.link : *f_.linkN,
-                R(54, 768, 150, 26), hotJH ? col::Accent2() : col::Accent());
-            AddHit(R(24, 768, 200, 26), kIdLinkJH);
+                R(54, 796, 150, 26), hotJH ? col::Accent2() : col::Accent());
+            AddHit(R(24, 796, 200, 26), kIdLinkJH);
 
             const bool hotApps = hover_ == kIdLinkApps;
             Text(g, L"MKJH_APPS", hotApps ? *f_.link : *f_.linkN,
-                R(145, 768, 135, 26), hotApps ? col::Accent2() : col::Accent());
-            AddHit(R(140, 768, 140, 26), kIdLinkApps);
+                R(145, 796, 135, 26), hotApps ? col::Accent2() : col::Accent());
+            AddHit(R(140, 796, 140, 26), kIdLinkApps);
 
             const bool hotArchive = hover_ == kIdLinkArchive;
             Text(g, L"MK-JH_ARCHIVE", hotArchive ? *f_.link : *f_.linkN,
-                R(290, 768, 180, 26), hotArchive ? col::Accent2() : col::Accent());
-            AddHit(R(285, 768, 190, 26), kIdLinkArchive);
+                R(290, 796, 180, 26), hotArchive ? col::Accent2() : col::Accent());
+            AddHit(R(285, 796, 190, 26), kIdLinkArchive);
         }
 
         // status line
@@ -2968,10 +3023,10 @@ void App::Paint(HDC dc, int W, int H)
         {
             status = L"Pick a game from the list to begin.";
         }
-        Text(g, status, *f_.sm, R(300, 742, 340, 50), tone, 0, true);
+        Text(g, status, *f_.sm, R(300, 770, 340, 50), tone, 0, true);
 
         const bool noPick = !running && (selected_ < 0 || selected_ >= static_cast<int>(games_.size()));
-        Button(g, R(672, 745, 220, 44), running ? (stopping_ ? L"STOPPING\u2026" : L"STOP") : L"START", noPick, running);
+        Button(g, R(672, 773, 220, 44), running ? (stopping_ ? L"STOPPING\u2026" : L"STOP") : L"START", noPick, running);
     }
 
     // ---- warning dialog (on top of everything) ----
