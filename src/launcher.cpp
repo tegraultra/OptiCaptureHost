@@ -835,11 +835,14 @@ struct RtssApi
         save(profile.c_str());
         update();
         const int back = Read(profile, "FramerateLimit", -1);
+        const int backDen = Read(profile, "FramerateLimitDenominator", denominator);
+        const int backMode = Read(profile, "SyncLimiter", syncLimiter);
         RtssLog(L"write profile \"" + std::wstring(profile.begin(), profile.end()) + L"\": limit " + std::to_wstring(limit) + L" den " +
                 std::to_wstring(denominator) + L" mode " + std::to_wstring(syncLimiter) + L" -> set results " + std::to_wstring(r1) +
-                std::to_wstring(r2) + std::to_wstring(r3) + L", read back limit " + std::to_wstring(back) + L", mode " +
-                std::to_wstring(Read(profile, "SyncLimiter", -1)));
-        return back == limit;
+                std::to_wstring(r2) + std::to_wstring(r3) + L", read back limit " + std::to_wstring(back) + L" den " +
+                std::to_wstring(backDen) + L" mode " + std::to_wstring(backMode));
+        // all three must have arrived (a change of only the denominator or the mode keeps the same limit number)
+        return back == limit && backDen == denominator && backMode == syncLimiter;
     }
 };
 
@@ -963,7 +966,9 @@ LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& g
     // notice a profile that is rewritten twice within a moment, and an Off followed by an Apply always worked.
     if (!off && st.limitTarget != 0)
     {
-        DoLimiter(api, st, gameExe, hz, true);
+        const LimiterOut o = DoLimiter(api, st, gameExe, hz, true);
+        if (o.code == 1 && !IsElevated())
+            return o; // not allowed to write: the caller repeats everything from an elevated copy
         Sleep(1100);
     }
 
