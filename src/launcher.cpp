@@ -959,6 +959,14 @@ LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& g
         return out;
     }
 
+    // Every Apply first switches the limiter off (limit 0) and waits a moment, then applies the new value. RTSS does not
+    // notice a profile that is rewritten twice within a moment, and an Off followed by an Apply always worked.
+    if (!off && st.limitTarget != 0)
+    {
+        DoLimiter(api, st, gameExe, hz, true);
+        Sleep(1100);
+    }
+
     // Same profile as the last Apply (only the number or the mode changed): overwrite it in one go and keep the values
     // saved from before the first Apply. Restoring and writing again within a moment is not noticed by RTSS.
     bool sameProfile = false;
