@@ -1108,7 +1108,7 @@ bool Host::PresentFrame(ID3D11Texture2D* src)
     UINT interval = (opt_.vsync && !fgActive) ? 1 : 0;
     if (st_.presentMode == 1) interval = 0;
     else if (st_.presentMode == 2) interval = 1;
-    else if (st_.presentMode == 3 || st_.presentMode == 5) interval = opt_.vsync ? 1 : 0; // classic: the host's own VSync, FG or not
+    else if (st_.presentMode == 3 || st_.presentMode == 5 || st_.presentMode == 6) interval = opt_.vsync ? 1 : 0; // classic: the host's own VSync, FG or not
     else if (st_.presentMode == 4) interval = opt_.vsync ? 1 : 0; // Lossless-style: VSync only when asked for, otherwise tearing
     const auto tp0 = std::chrono::steady_clock::now();
     HRESULT hr = swap_->Present(interval, flags);
@@ -1582,7 +1582,7 @@ void Host::PollSettings()
         Log("PresentDelayMs = %d (live)", st_.presentDelay);
     }
     if (st_.presentMode != old.presentMode)
-        Log("Present mode %d (0 auto, 1 interval 0, 2 interval 1, 3 classic, 4 Lossless-style, 5 classic half refresh) - restart the capture to apply", st_.presentMode);
+        Log("Present mode %d (0 auto, 1 interval 0, 2 interval 1, 3 classic, 4 Lossless-style, 5 classic half refresh, 6 classic unlimited) - restart the capture to apply", st_.presentMode);
     if (st_.menuKey != old.menuKey)
     {
         opt_.menuKey = static_cast<int>(st_.menuKey);
@@ -1611,7 +1611,7 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
         GetPrivateProfileStringW(L"Advanced", L"PaceK", L"1", kb, 32, oc::SettingsPath().c_str());
         opt_.paceK = std::clamp(_wtof(kb), 0.0, 8.0);
     }
-    if (st_.presentMode == 3 || st_.presentMode == 4 || st_.presentMode == 5)
+    if (st_.presentMode == 3 || st_.presentMode == 4 || st_.presentMode == 5 || st_.presentMode == 6)
         opt_.overlayAlpha = 255; // classic / Lossless-style: plain opaque overlay (lets Windows flip it straight to the screen)
     Log("Overlay alpha %d, display affinity %d, PaceK %.2f", opt_.overlayAlpha, opt_.affinity, opt_.paceK);
     opt_.startDelayMs = std::clamp<int>(static_cast<int>(GetPrivateProfileIntW(L"Advanced", L"StartDelayMs", 1500, oc::SettingsPath().c_str())), 0, 10000);
@@ -1884,7 +1884,7 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
         }
 
         // VSync with Arthur frame generation: keep the host's frames k / refresh apart (k = presents per host frame).
-        if (opt_.vsync && st_.frameGenMode == 1 && st_.presentMode != 1 && st_.presentMode != 3 && st_.presentMode != 4 && st_.presentMode != 5 && refreshHz_ > 0.0)
+        if (opt_.vsync && st_.frameGenMode == 1 && st_.presentMode != 1 && st_.presentMode != 3 && st_.presentMode != 4 && st_.presentMode != 5 && st_.presentMode != 6 && refreshHz_ > 0.0)
         {
             const auto np = std::chrono::steady_clock::now();
             if (opt_.paceK >= 0.25)

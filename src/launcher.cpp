@@ -88,6 +88,9 @@ constexpr int kIdLimitOff = 25;
 constexpr int kIdBorderless = 26;
 constexpr int kIdPictureOn = 27;
 constexpr int kIdPictureOff = 28;
+constexpr int kIdProfileSave = 29;
+constexpr int kIdProfileAuto = 30;
+const wchar_t* const kProfilesDir = L"Game Profiles"; // next to the launcher: one folder per game
 constexpr int kLimitModeMenuBase = 5800;
 constexpr int kLimitTargetMenuBase = 5500;
 constexpr int kLimitFpsMenuBase = 5600;
@@ -661,11 +664,12 @@ HICON MakeAppIcon(int px)
 enum Warn
 {
     kWarnRtssMissing, // the frame limiter needs RivaTuner Statistics Server (RTSS) to be installed
+    kWarnProfile,     // a saved game profile exists for the game that was just picked
     kWarnCount
 };
 
-const wchar_t* const kWarnKeys[kWarnCount] = { L"HideRtssMissing" }; // OptiCaptureHost.ini [Warnings]
-const wchar_t* const kWarnTitles[kWarnCount] = { L"RivaTuner (RTSS) is not installed" };
+const wchar_t* const kWarnKeys[kWarnCount] = { L"HideRtssMissing", L"HideProfile" }; // OptiCaptureHost.ini [Warnings]
+const wchar_t* const kWarnTitles[kWarnCount] = { L"RivaTuner (RTSS) is not installed", L"Saved game profile found" };
 
 // Folder of the running RivaTuner Statistics Server, with a trailing backslash (empty when it is not running).
 std::wstring RtssDir()
@@ -1245,7 +1249,7 @@ class App
 
     void Refresh();
     void ClampScroll();
-    gp::RectF ListView() const { return R(36, 164, 476, 478); }
+    gp::RectF ListView() const { return R(36, 164, 476, 438); }
 
     void OnClick(int id);
     LRESULT OnCaptureKey(UINT vk);
@@ -1275,6 +1279,13 @@ class App
         return -1;
     }
     void ToggleBorderless();
+    bool dlgProfile_ = false;     // the dialog is the "apply the saved profile?" question
+    std::wstring profileExe_;     // the game that question is about
+    int lastOffered_ = -1;
+    void SaveProfile();
+    bool ProfileFolder(const std::wstring& exe, std::wstring& dir) const;
+    void ApplyProfile(const std::wstring& exe);
+    void OfferProfile();
     bool pictureOn_ = false; // [CAS] Enabled in OptiScaler.ini
     void ReadPictureState()
     {
@@ -1304,7 +1315,7 @@ class App
     {
         // Arthur: both "On" modes leave OptiScaler on auto and let the host pace its frames instead.
         // Classic (2.2.0) mode: VSync is only the host's own setting and OptiScaler is left on auto for every FG.
-        const bool classic = st_.presentMode == 3 || st_.presentMode == 5;
+        const bool classic = st_.presentMode == 3 || st_.presentMode == 5 || st_.presentMode == 6;
         const bool ls = st_.presentMode == 4; // Lossless-style: tearing unless VSync is explicitly On, host-side only
         const bool on = vsyncMode_ == 1 || vsyncMode_ == 2;
         const bool hostOnly = on && (classic || ls || st_.frameGenMode == 1);
@@ -1366,7 +1377,7 @@ bool App::Create(HINSTANCE inst)
         else if (_wcsicmp(vm, L"off") == 0) vsyncMode_ = 0;
         else if (_wcsicmp(vm, L"auto") == 0) vsyncMode_ = -1;
         else vsyncMode_ = ReadForceVsync();
-        st_.vsync = (st_.presentMode == 3 || st_.presentMode == 5) ? vsyncMode_ != 0
+        st_.vsync = (st_.presentMode == 3 || st_.presentMode == 5 || st_.presentMode == 6) ? vsyncMode_ != 0
                     : (st_.presentMode == 4) ? (vsyncMode_ == 1 || vsyncMode_ == 2)
                                              : (vsyncMode_ == 1 || (vsyncMode_ == 2 && st_.frameGenMode == 1));
     }
@@ -1523,6 +1534,9 @@ void App::Refresh()
             }
         }
     }
+
+    if (selected_ < 0)
+        lastOffered_ = -1; // the game is gone: offer its profile again when it is picked next time
 
     ClampScroll();
     Invalidate();
@@ -1892,10 +1906,125 @@ void App::ToggleBorderless()
     Refresh();
 }
 
+// Folder of the saved profile of a game: <launcher folder>\Game Profiles\<exe name without .exe>
+bool App::ProfileFolder(const std::wstring& exe, std::wstring& dir) const
+{
+    if (exe.empty())
+        return false;
+    std::wstring name = exe;
+    const size_t dot = name.find_last_of(L'.');
+    if (dot != std::wstring::npos && dot > 0)
+        name.resize(dot);
+    for (wchar_t& c : name)
+        if (wcschr(L"<>:\"/\\|?*", c) != nullptr)
+            c = L'_';
+    while (!name.empty() && (name.back() == L' ' || name.back() == L'.'))
+        name.pop_back();
+    if (name.empty())
+        return false;
+    dir = oc::ExeDir() + kProfilesDir + L"\\" + name;
+    return true;
+}
+
+// Button "Save game profile": copies the OptiScaler.ini next to the launcher into the game's own profile folder.
+void App::SaveProfile()
+{
+    if (selected_ < 0 || selected_ >= static_cast<int>(games_.size()))
+    {
+        SetNote(L"Pick a game in the list first.", Note::Error);
+        return;
+    }
+    const std::wstring exe = games_[selected_].exe;
+    std::wstring dir;
+    if (!ProfileFolder(exe, dir))
+    {
+        SetNote(L"This window has no program name, so a profile cannot be saved for it.", Note::Error);
+        return;
+    }
+    const std::wstring src = oc::ExeDir() + L"OptiScaler.ini";
+    if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        SetNote(L"OptiScaler.ini was not found next to the launcher.", Note::Error);
+        return;
+    }
+    CreateDirectoryW((oc::ExeDir() + kProfilesDir).c_str(), nullptr);
+    CreateDirectoryW(dir.c_str(), nullptr);
+    if (!CopyFileW(src.c_str(), (dir + L"\\OptiScaler.ini").c_str(), FALSE))
+    {
+        SetNote(L"Could not save the profile. Check the folder permissions.", Note::Error);
+        return;
+    }
+    SetNote(L"Profile saved for " + exe + L" (" + kProfilesDir + L"\\" + dir.substr(dir.find_last_of(L'\\') + 1) + L").", Note::Ok);
+}
+
+// Puts the saved OptiScaler.ini of a game back next to the launcher.
+void App::ApplyProfile(const std::wstring& exe)
+{
+    std::wstring dir;
+    if (!ProfileFolder(exe, dir))
+        return;
+    const std::wstring src = dir + L"\\OptiScaler.ini";
+    if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        SetNote(L"The saved profile of " + exe + L" has no OptiScaler.ini.", Note::Error);
+        return;
+    }
+    if (!CopyFileW(src.c_str(), (oc::ExeDir() + L"OptiScaler.ini").c_str(), FALSE))
+    {
+        SetNote(L"Could not apply the saved profile of " + exe + L". Check the file and permissions.", Note::Error);
+        return;
+    }
+    ReadPictureState();
+    SetNote(L"Saved profile of " + exe + L" applied (OptiScaler.ini replaced).", Note::Ok);
+}
+
+// A game was picked in the list: if it has a saved profile, apply it (auto mode) or ask.
+void App::OfferProfile()
+{
+    if (selected_ < 0 || selected_ >= static_cast<int>(games_.size()) || selected_ == lastOffered_)
+        return;
+    lastOffered_ = selected_;
+    const std::wstring exe = games_[selected_].exe;
+    std::wstring dir;
+    if (!ProfileFolder(exe, dir) || GetFileAttributesW((dir + L"\\OptiScaler.ini").c_str()) == INVALID_FILE_ATTRIBUTES)
+        return;
+    if (st_.profileAuto)
+    {
+        ApplyProfile(exe);
+        return;
+    }
+    profileExe_ = exe;
+    warnText_[kWarnProfile] = L"You saved settings for " + exe + L" earlier.\n\nDo you want to apply them now? This replaces the "
+                              L"OptiScaler.ini next to the launcher with the one saved for this game.";
+    dlgKind_ = kWarnProfile;
+    dlgProfile_ = true;
+    dlgDontShow_ = false;
+    dlgStart_ = false;
+}
+
 void App::CloseDialog(bool accepted)
 {
     const int kind = dlgKind_;
     const bool wasStart = dlgStart_;
+    if (dlgProfile_)
+    {
+        // "Apply the saved profile?": the check box means "do this automatically from now on"
+        const bool autoNow = dlgDontShow_;
+        dlgKind_ = -1;
+        dlgDontShow_ = false;
+        dlgProfile_ = false;
+        if (accepted)
+        {
+            if (autoNow)
+            {
+                st_.profileAuto = 1;
+                Save();
+            }
+            ApplyProfile(profileExe_);
+        }
+        Invalidate();
+        return;
+    }
     if (kind >= 0 && dlgDontShow_)
     {
         hideWarn_[kind] = true;
@@ -2023,7 +2152,7 @@ void App::PaintDialog(gp::Graphics& g, int W, int H)
         StrokeRound(g, box, S(5), hot ? col::Accent2() : col::Line(), max(1.0f, S(1)));
         if (dlgDontShow_)
             Text(g, L"✓", *f_.chip, box, col::White(), 1);
-        Text(g, L"Don't show this warning again", *f_.body, R(190, 484, 320, 24), col::Text());
+        Text(g, dlgProfile_ ? L"Always apply saved profiles automatically" : L"Don't show this warning again", *f_.body, R(190, 484, 380, 24), col::Text());
         AddHit(R(160, 480, 360, 32), kIdDlgCheck);
     }
 
@@ -2039,7 +2168,12 @@ void App::PaintDialog(gp::Graphics& g, int W, int H)
         AddHit(r, id);
     };
 
-    if (dlgStart_)
+    if (dlgProfile_)
+    {
+        button(R(494, 512, 130, 34), L"No", kIdDlgCancel, false);
+        button(R(636, 512, 150, 34), L"Apply", kIdDlgOk, true);
+    }
+    else if (dlgStart_)
     {
         button(R(494, 512, 130, 34), L"Cancel", kIdDlgCancel, false);
         button(R(636, 512, 150, 34), L"Start anyway", kIdDlgOk, true);
@@ -2405,18 +2539,19 @@ void App::OnClick(int id)
         static const wchar_t* names[] = {
             L"Auto  (FG on: no wait, FG off: VSync)", L"Always no wait  (interval 0)", L"Always wait for vblank  (interval 1)",
             L"Classic  (behaves like version 2.2.0)", L"Lossless-style  (low latency, tearing allowed)",
-            L"Classic + half refresh  (exactly refresh / 2 frames)"
+            L"Classic + half refresh  (exactly refresh / 2 frames)",
+            L"Classic + unlimited  (same, no half-refresh limit)"
         };
         HMENU menu = CreatePopupMenu();
         if (menu)
         {
-            for (int v = 0; v <= 5; ++v)
+            for (int v = 0; v <= 6; ++v)
                 AppendMenuW(menu, MF_STRING | (st_.presentMode == v ? MF_CHECKED : 0), kPresentMenuBase + v, names[v]);
             POINT pt{};
             GetCursorPos(&pt);
             const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
             DestroyMenu(menu);
-            if (cmd >= kPresentMenuBase && cmd <= kPresentMenuBase + 5)
+            if (cmd >= kPresentMenuBase && cmd <= kPresentMenuBase + 6)
             {
                 st_.presentMode = static_cast<int>(cmd - kPresentMenuBase);
                 Save();
@@ -2520,6 +2655,17 @@ void App::OnClick(int id)
         st_.limitAuto = st_.limitAuto ? 0 : 1;
         Save();
         SetNote(st_.limitAuto ? L"The limiter will be applied every time you press START." : L"The limiter is applied only with the Apply button.", Note::Ok);
+    }
+    else if (id == kIdProfileSave)
+    {
+        SaveProfile();
+    }
+    else if (id == kIdProfileAuto)
+    {
+        st_.profileAuto = st_.profileAuto ? 0 : 1;
+        Save();
+        SetNote(st_.profileAuto ? L"Saved game profiles will be applied automatically when you pick the game."
+                                : L"You will be asked before a saved game profile is applied.", Note::Ok);
     }
     else if (id == kIdPictureOn || id == kIdPictureOff)
     {
@@ -2706,6 +2852,7 @@ void App::OnClick(int id)
     {
         selected_ = id - kIdRow0;
         SetNote(L"");
+        OfferProfile();
     }
     ReadPictureState();
     Invalidate();
@@ -3135,47 +3282,68 @@ void App::Paint(HDC dc, int W, int H)
     {
         static const wchar_t* boostNames[] = { L"Off  (weak GPUs)", L"Light  (CPU priority)", L"Balanced  (CPU + GPU high)", L"Max  (strong GPUs)" };
 
-        Text(g, L"Performance", *f_.bodyB, R(44, 652, 130, 24), col::Text());
+        Text(g, L"Performance", *f_.bodyB, R(44, 612, 130, 24), col::Text());
 
-        const gp::RectF selector = R(176, 648, 328, 32);
+        const gp::RectF selector = R(176, 608, 328, 32);
         const bool hot = hover_ == kIdBoostSelect;
         FillRound(g, selector, S(8), hot ? col::RowHot() : col::Row());
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
-        Text(g, boostNames[(st_.boost >= 0 && st_.boost <= 3) ? st_.boost : 3], *f_.chip, R(186, 654, 308, 22), col::Text());
+        Text(g, boostNames[(st_.boost >= 0 && st_.boost <= 3) ? st_.boost : 3], *f_.chip, R(186, 614, 308, 22), col::Text());
         AddHit(selector, kIdBoostSelect);
     }
 
     // ---- present mode selector ----
     {
-        static const wchar_t* presentNames[] = { L"Auto  (recommended)", L"Always no wait  (interval 0)", L"Always wait for vblank  (interval 1)", L"Classic  (like 2.2.0)", L"Lossless-style  (low latency)", L"Classic + half refresh" };
+        static const wchar_t* presentNames[] = { L"Auto  (recommended)", L"Always no wait  (interval 0)", L"Always wait for vblank  (interval 1)", L"Classic  (like 2.2.0)", L"Lossless-style  (low latency)", L"Classic + half refresh", L"Classic + unlimited" };
 
-        Text(g, L"Present mode", *f_.bodyB, R(44, 694, 130, 24), col::Text());
+        Text(g, L"Present mode", *f_.bodyB, R(44, 654, 130, 24), col::Text());
 
-        const gp::RectF selector = R(176, 690, 328, 32);
+        const gp::RectF selector = R(176, 650, 328, 32);
         const bool hot = hover_ == kIdPresentSelect;
         FillRound(g, selector, S(8), hot ? col::RowHot() : col::Row());
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
-        Text(g, presentNames[(st_.presentMode >= 0 && st_.presentMode <= 5) ? st_.presentMode : 0], *f_.chip, R(186, 696, 308, 22), col::Text());
+        Text(g, presentNames[(st_.presentMode >= 0 && st_.presentMode <= 6) ? st_.presentMode : 0], *f_.chip, R(186, 656, 308, 22), col::Text());
         AddHit(selector, kIdPresentSelect);
     }
 
     // ---- present delay selector ----
     {
-        Text(g, L"Present delay", *f_.bodyB, R(44, 736, 130, 24), col::Text());
+        Text(g, L"Present delay", *f_.bodyB, R(44, 696, 130, 24), col::Text());
 
-        const gp::RectF selector = R(176, 732, 328, 32);
+        const gp::RectF selector = R(176, 692, 328, 32);
         const bool hot = hover_ == kIdDelaySelect;
         FillRound(g, selector, S(8), hot ? col::RowHot() : col::Row());
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
         std::wstring t = std::to_wstring(st_.presentDelay) + L" ms";
         if (st_.presentDelay == 0) t += L"  (off)";
         else if (st_.presentDelay == 3) t += L"  (recommended)";
-        Text(g, t, *f_.chip, R(186, 738, 308, 22), col::Text());
+        Text(g, t, *f_.chip, R(186, 698, 308, 22), col::Text());
         AddHit(selector, kIdDelaySelect);
     }
 
-    Text(g, L"Tip: run the game in Borderless or Windowed mode, not Exclusive Fullscreen.", *f_.tiny, R(44, 772, 460, 22),
+    Text(g, L"Tip: run the game in Borderless or Windowed mode, not Exclusive Fullscreen.", *f_.tiny, R(44, 732, 460, 22),
          col::Muted(), 0, true);
+
+    // ---- game profile: save button + automatic apply ----
+    {
+        const bool pick = selected_ >= 0 && selected_ < static_cast<int>(games_.size());
+        const gp::RectF sb = R(44, 764, 190, 28);
+        const bool hotS = hover_ == kIdProfileSave && pick;
+        FillRound(g, sb, S(8), hotS ? col::Accent2() : col::Accent());
+        StrokeRound(g, sb, S(8), col::Line(), max(1.0f, S(1)));
+        Text(g, L"Save game profile", *f_.chip, sb, pick ? col::White() : col::Muted(), 1);
+        if (pick)
+            AddHit(sb, kIdProfileSave);
+
+        const gp::RectF box = R(252, 769, 18, 18);
+        const bool hotA = hover_ == kIdProfileAuto;
+        FillRound(g, box, S(5), st_.profileAuto ? col::Accent() : col::Row());
+        StrokeRound(g, box, S(5), hotA ? col::Accent2() : col::Line(), max(1.0f, S(1)));
+        if (st_.profileAuto)
+            Text(g, L"\u2713", *f_.chip, box, col::White(), 1);
+        Text(g, L"Apply saved profiles automatically", *f_.sm, R(276, 767, 240, 22), col::Text());
+        AddHit(R(250, 764, 270, 28), kIdProfileAuto);
+    }
 
     // ---- VSync card ----
     {
