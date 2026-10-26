@@ -959,8 +959,23 @@ LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& g
         return out;
     }
 
-    // 1) put back whatever an earlier Apply changed
+    // Same profile as the last Apply (only the number or the mode changed): overwrite it in one go and keep the values
+    // saved from before the first Apply. Restoring and writing again within a moment is not noticed by RTSS.
+    bool sameProfile = false;
     if (GetPrivateProfileIntW(L"Rtss", L"Has", 0, ini.c_str()) != 0)
+    {
+        wchar_t prev[260] = {};
+        GetPrivateProfileStringW(L"Rtss", L"Profile", L"", prev, 260, ini.c_str());
+        std::wstring want;
+        if (st.limitTarget == 1)
+            want = gameExe;
+        else if (st.limitTarget == 2)
+            want = kHostExe;
+        sameProfile = st.limitTarget != 0 && _wcsicmp(prev, want.c_str()) == 0;
+    }
+
+    // 1) put back whatever an earlier Apply changed (another profile)
+    if (!sameProfile && GetPrivateProfileIntW(L"Rtss", L"Has", 0, ini.c_str()) != 0)
     {
         wchar_t prof[260] = {};
         GetPrivateProfileStringW(L"Rtss", L"Profile", L"", prof, 260, ini.c_str());
@@ -1021,21 +1036,25 @@ LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& g
         num = 30;
 
     const std::string name = Narrow(profile);
-    const int oLimit = api.Read(name, "FramerateLimit", 0);
-    const int oDen = api.Read(name, "FramerateLimitDenominator", 1);
-    const int oSync = api.Read(name, "SyncLimiter", 0);
-    WritePrivateProfileStringW(L"Rtss", L"Profile", profile.c_str(), ini.c_str());
-    WritePrivateProfileStringW(L"Rtss", L"OrigLimit", std::to_wstring(oLimit).c_str(), ini.c_str());
-    WritePrivateProfileStringW(L"Rtss", L"OrigDen", std::to_wstring(oDen).c_str(), ini.c_str());
-    WritePrivateProfileStringW(L"Rtss", L"OrigSync", std::to_wstring(oSync).c_str(), ini.c_str());
-    WritePrivateProfileStringW(L"Rtss", L"Has", L"1", ini.c_str());
+    if (!sameProfile)
+    {
+        const int oLimit = api.Read(name, "FramerateLimit", 0);
+        const int oDen = api.Read(name, "FramerateLimitDenominator", 1);
+        const int oSync = api.Read(name, "SyncLimiter", 0);
+        WritePrivateProfileStringW(L"Rtss", L"Profile", profile.c_str(), ini.c_str());
+        WritePrivateProfileStringW(L"Rtss", L"OrigLimit", std::to_wstring(oLimit).c_str(), ini.c_str());
+        WritePrivateProfileStringW(L"Rtss", L"OrigDen", std::to_wstring(oDen).c_str(), ini.c_str());
+        WritePrivateProfileStringW(L"Rtss", L"OrigSync", std::to_wstring(oSync).c_str(), ini.c_str());
+        WritePrivateProfileStringW(L"Rtss", L"Has", L"1", ini.c_str());
+    }
 
     static const wchar_t* const modeNames[] = { L"async", L"front edge sync", L"back edge sync" };
     const int mode = (st.limitMode >= 0 && st.limitMode <= 2) ? st.limitMode : 1;
     const std::wstring who = profile.empty() ? std::wstring(L"Global") : profile;
     if (!api.Write(name, num, den, mode))
     {
-        WritePrivateProfileStringW(L"Rtss", L"Has", L"0", ini.c_str());
+        if (!sameProfile)
+            WritePrivateProfileStringW(L"Rtss", L"Has", L"0", ini.c_str());
         out.code = 1;
         out.info = L"RTSS did not accept the change.";
         out.note = L"RTSS did not take the limit.";
