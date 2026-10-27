@@ -1115,7 +1115,7 @@ int DoOsd(RtssApi& api, const std::wstring& exe, bool hide)
         {
             int cur = api.Read(prof, "EnableOSD", -1);
             if (cur < 0)
-                cur = api.Read("", "EnableOSD", 1);
+                cur = 1; // RTSS default; the Global profile is never touched or read
             WritePrivateProfileStringW(L"Rtss", L"OsdExe", exe.c_str(), ini.c_str());
             WritePrivateProfileStringW(L"Rtss", L"OsdOrig", std::to_wstring(cur).c_str(), ini.c_str());
             WritePrivateProfileStringW(L"Rtss", L"OsdHas", L"1", ini.c_str());
