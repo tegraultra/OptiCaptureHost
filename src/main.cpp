@@ -454,6 +454,35 @@ LRESULT CALLBACK OverlayProc(HWND h, UINT m, WPARAM w, LPARAM l)
     return DefWindowProcW(h, m, w, l);
 }
 
+LRESULT CALLBACK LabelProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    if (m == WM_ERASEBKGND)
+        return 1;
+    if (m == WM_PAINT)
+    {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT rc;
+        GetClientRect(h, &rc);
+        HBRUSH bg = CreateSolidBrush(RGB(12, 12, 16));
+        FillRect(dc, &rc, bg);
+        DeleteObject(bg);
+        wchar_t t[64] = {};
+        GetWindowTextW(h, t, 64);
+        HFONT f = CreateFontW(-22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                              CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        HGDIOBJ old = SelectObject(dc, f);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(120, 255, 140));
+        DrawTextW(dc, t, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, old);
+        DeleteObject(f);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
 class Host
 {
   public:
@@ -478,6 +507,8 @@ class Host
     bool RefreshGeometry();
     void LogGeometry();
     void MoveOverlay();
+    void CreateLabel();
+    void UpdateLabel();
     void EnforceOverlayStyle();
     void ToggleInteractive();
     bool ForceForeground(HWND h);
@@ -497,6 +528,10 @@ class Host
     // Output scaling (Upscale): the swap chain and the overlay are monitor sized and the captured picture is scaled up
     // to them on the GPU (bilinear or FSR 1: EASU + RCAS). Without it outW_/outH_ equal width_/height_.
     bool upOn_ = false;
+    HWND label_ = nullptr; // small "720 to 1080" note in the monitor corner, shown for a few seconds
+    std::chrono::steady_clock::time_point labelUntil_{};
+    bool labelAlways_ = false;
+    UINT labelH_ = 0; // captured height the label shows (it changes when the game window is resized)
     int upMethod_ = 0; // method chosen at start (1 bilinear, 2 FSR 1, 3 NIS); the sharpness values are read live
     UINT outW_ = 0;
     UINT outH_ = 0;
@@ -961,7 +996,72 @@ bool Host::InitOverlayAndSwapChain()
     }
 
     ShowWindow(overlay_, SW_SHOWNOACTIVATE);
-    return CreateShared();
+    if (!CreateShared())
+        return false;
+    if (upOn_)
+        CreateLabel();
+    return true;
+}
+
+void Host::CreateLabel()
+{
+    if (st_.labelSeconds <= 0)
+        return;
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = LabelProc;
+    wc.hInstance = inst_;
+    wc.lpszClassName = L"OptiCaptureHostLabel";
+    RegisterClassExW(&wc);
+
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(MonitorFromWindow(target_, MONITOR_DEFAULTTONEAREST), &mi))
+        return;
+    static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS" };
+    wchar_t text[64];
+    labelH_ = height_;
+    swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 3) ? upMethod_ : 0]);
+    label_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT, wc.lpszClassName,
+                             text, WS_POPUP, mi.rcMonitor.left + 16, mi.rcMonitor.top + 16, 270, 40, nullptr, nullptr, inst_, nullptr);
+    if (!label_)
+        return;
+    SetLayeredWindowAttributes(label_, 0, 215, LWA_ALPHA);
+    ShowWindow(label_, SW_SHOWNOACTIVATE);
+    labelAlways_ = st_.labelSeconds >= 999;
+    labelUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(st_.labelSeconds);
+}
+
+void Host::UpdateLabel()
+{
+    // The label always shows what really is being captured: when the game changes its picture size, show it again.
+    if (upOn_ && st_.labelSeconds > 0 && height_ != labelH_)
+    {
+        if (label_)
+        {
+            static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS" };
+            wchar_t text[64];
+            labelH_ = height_;
+            swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 3) ? upMethod_ : 0]);
+            SetWindowTextW(label_, text);
+            InvalidateRect(label_, nullptr, TRUE);
+            labelUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(st_.labelSeconds);
+        }
+        else
+        {
+            CreateLabel();
+        }
+    }
+    if (!label_)
+        return;
+    if (!labelAlways_ && std::chrono::steady_clock::now() > labelUntil_)
+    {
+        DestroyWindow(label_);
+        label_ = nullptr;
+        return;
+    }
+    // stay above the overlay
+    SetWindowPos(label_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 bool Host::CreateShared()
@@ -2031,6 +2131,8 @@ void Host::Shutdown()
     }
     swap_.Reset();
     g_spoofOverlay = nullptr;
+    if (label_)
+        DestroyWindow(label_);
     if (overlay_)
         DestroyWindow(overlay_);
     if (fenceEvent_)
@@ -2310,6 +2412,7 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
             if (!RefreshGeometry())
                 break;
             MoveOverlay();
+            UpdateLabel();
             houseMaxMs_ = (std::max)(houseMaxMs_, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - hk0).count());
         }
         if (now - liveAt_ >= std::chrono::seconds(1))

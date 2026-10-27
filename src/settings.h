@@ -37,6 +37,7 @@ struct Settings
     int presentMode = 3;      // 0 auto (FG on: no wait, FG off: VSync), 1 always interval 0, 2 always interval 1, 3 classic 2.2.0 behaviour, 4 Lossless-style (tearing, latency 1), 5 classic + exactly refresh/2 base frames, 6 classic + unlimited capture (no half-refresh limit)
     int upscale = 0;          // output scaling: 0 off, 1 bilinear, 2 FSR1 (EASU+RCAS), 3 NIS; read at start
     int upscaleLevel = 1;     // input size: 0 Quality 67%, 1 Balanced 58%, 2 Performance 50% (launcher resizes the window)
+    int labelSeconds = 8;     // output scaling: show "720 to 1080" in the corner for this many seconds (0 never, 999 always)
     int nisSharp = 50;        // NIS sharpness x100 (0..100)
     int upscaleSharp = 25;    // FSR1 RCAS sharpness x100 (0 = sharpest, 200 = none), default 0.25
     int presentDelay = 3;     // ms the host holds each frame before Present, 0..12
@@ -111,6 +112,8 @@ inline void LoadSettings(Settings& s)
     if (s.upscaleLevel < 0 || s.upscaleLevel > 2) s.upscaleLevel = 1;
     s.nisSharp = GetPrivateProfileIntW(L"Upscale", L"NisSharpness", 50, path.c_str());
     if (s.nisSharp < 0 || s.nisSharp > 100) s.nisSharp = 50;
+    s.labelSeconds = GetPrivateProfileIntW(L"Upscale", L"LabelSeconds", 8, path.c_str());
+    if (s.labelSeconds < 0 || s.labelSeconds > 999) s.labelSeconds = 8;
     s.upscaleSharp = GetPrivateProfileIntW(L"Upscale", L"Sharpness", 25, path.c_str());
     if (s.upscaleSharp < 0 || s.upscaleSharp > 200) s.upscaleSharp = 25;
     s.presentDelay = GetPrivateProfileIntW(L"Advanced", L"PresentDelayMs", 3, path.c_str());
@@ -163,6 +166,7 @@ inline void SaveSettings(const Settings& s)
     WritePrivateProfileStringW(L"Upscale", L"Method", std::to_wstring(s.upscale).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Upscale", L"Level", std::to_wstring(s.upscaleLevel).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Upscale", L"NisSharpness", std::to_wstring(s.nisSharp).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"Upscale", L"LabelSeconds", std::to_wstring(s.labelSeconds).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Upscale", L"Sharpness", std::to_wstring(s.upscaleSharp).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Advanced", L"PresentDelayMs", std::to_wstring(s.presentDelay).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"Target", std::to_wstring(s.limitTarget).c_str(), path.c_str());
