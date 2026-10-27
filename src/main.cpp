@@ -497,6 +497,7 @@ class Host
     // Output scaling (Upscale): the swap chain and the overlay are monitor sized and the captured picture is scaled up
     // to them on the GPU (bilinear or FSR 1: EASU + RCAS). Without it outW_/outH_ equal width_/height_.
     bool upOn_ = false;
+    int upMethod_ = 0; // method chosen at start (1 bilinear, 2 FSR 1, 3 NIS); the sharpness values are read live
     UINT outW_ = 0;
     UINT outH_ = 0;
     ComPtr<ID3D12RootSignature> upRoot_;
@@ -830,6 +831,7 @@ bool Host::InitOverlayAndSwapChain()
             outW_ = static_cast<UINT>(mi.rcMonitor.right - mi.rcMonitor.left);
             outH_ = static_cast<UINT>(mi.rcMonitor.bottom - mi.rcMonitor.top);
             upOn_ = InitUpscale();
+            upMethod_ = st_.upscale;
         }
         if (upOn_)
         {
@@ -1371,7 +1373,7 @@ void Host::RecordUpscale(ID3D12Resource* bb, UINT idx)
     UINT c[16] = {};
 
     D3D12_GPU_DESCRIPTOR_HANDLE finalSrc = srv0;
-    if (st_.upscale == 3 && nisPso_)
+    if (upMethod_ == 3 && nisPso_)
     {
         if (!nisCoefDone_)
         {
@@ -1415,7 +1417,7 @@ void Host::RecordUpscale(ID3D12Resource* bb, UINT idx)
 
     barrier(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-    if (st_.upscale == 2)
+    if (upMethod_ == 2)
     {
         // EASU: edge adaptive upscale, captured picture -> intermediate (output size)
         c[0] = FloatBits(inW / ouW);

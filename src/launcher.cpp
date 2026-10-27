@@ -92,6 +92,7 @@ constexpr int kIdProfileSave = 29;
 constexpr int kIdProfileAuto = 30;
 constexpr int kIdUpSelect = 31;
 constexpr int kIdUpResize = 32;
+constexpr int kIdUpSlider = 33;
 constexpr int kUpMenuBase = 5900;
 const wchar_t* const kProfilesDir = L"Game Profiles"; // next to the launcher: one folder per game
 constexpr int kLimitModeMenuBase = 5800;
@@ -1315,6 +1316,28 @@ class App
     }
     void ToggleBorderless();
     void ResizeGameWindow(bool quiet = false);
+    gp::RectF upSliderRect_{};
+    bool upSliding_ = false;
+    ULONGLONG upSliderSaved_ = 0;
+    int UpSharpValue() const { return st_.upscale == 3 ? st_.nisSharp : (st_.upscale == 2 ? 100 - st_.upscaleSharp : 0); }
+    void SetUpSharpFromX(int x, bool save)
+    {
+        if (st_.upscale != 2 && st_.upscale != 3)
+            return;
+        float f = (static_cast<float>(x) - upSliderRect_.X) / upSliderRect_.Width;
+        f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+        const int v = static_cast<int>(f * 100.0f + 0.5f);
+        if (st_.upscale == 3)
+            st_.nisSharp = v;
+        else
+            st_.upscaleSharp = 100 - v;
+        const ULONGLONG now = GetTickCount64();
+        if (save || now - upSliderSaved_ > 150)
+        {
+            Save();
+            upSliderSaved_ = now;
+        }
+    }
     HWND upWnd_ = nullptr; // game window the launcher shrank for output scaling, and the rect to give back
     RECT upRect_{};
     bool dlgProfile_ = false;     // the dialog is the "apply the saved profile?" question
@@ -2847,7 +2870,10 @@ void App::OnClick(int id)
                 st_.upscale = methods[k / 3];
                 st_.upscaleLevel = k % 3;
                 Save();
-                SetNote(L"START makes the game window that small and scales it up. Resize does it right now.", Note::Info);
+                OnClick(kIdPictureOn); // the upscaler on the picture goes on with it
+                ReadPictureState();
+                SetNote(L"START makes the game window that small and scales it up. \"Run the upscaler on the picture\" was turned on too.",
+                        Note::Info);
             }
         }
     }
@@ -3063,6 +3089,12 @@ LRESULT App::OnMessage(UINT m, WPARAM w, LPARAM l)
             TrackMouseEvent(&t);
             tracking_ = true;
         }
+        if (upSliding_)
+        {
+            SetUpSharpFromX(GET_X_LPARAM(l), false);
+            Invalidate();
+            return 0;
+        }
         const int h = HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l));
         if (h != hover_)
         {
@@ -3099,6 +3131,11 @@ LRESULT App::OnMessage(UINT m, WPARAM w, LPARAM l)
         }
         pressed_ = h;
         SetCapture(hwnd_);
+        if (h == kIdUpSlider)
+        {
+            upSliding_ = true;
+            SetUpSharpFromX(GET_X_LPARAM(l), false);
+        }
         Invalidate();
         return 0;
     }
@@ -3106,6 +3143,14 @@ LRESULT App::OnMessage(UINT m, WPARAM w, LPARAM l)
     case WM_LBUTTONUP:
     {
         ReleaseCapture();
+        if (upSliding_)
+        {
+            upSliding_ = false;
+            SetUpSharpFromX(GET_X_LPARAM(l), true);
+            pressed_ = kIdNone;
+            Invalidate();
+            return 0;
+        }
         const int h = HitAt(GET_X_LPARAM(l), GET_Y_LPARAM(l));
         const int was = pressed_;
         pressed_ = kIdNone;
@@ -3511,8 +3556,29 @@ void App::Paint(HDC dc, int W, int H)
             AddHit(rb, kIdUpResize);
     }
 
-    Text(g, L"Tip: run the game in Borderless or Windowed mode, not Exclusive Fullscreen.", *f_.tiny, R(44, 800, 460, 16),
-         col::Muted(), 0, true);
+    // ---- sharpness slider (FSR 1: RCAS, NIS: sharpness); bilinear has none ----
+    {
+        const bool has = st_.upscale == 2 || st_.upscale == 3;
+        Text(g, L"Sharpness", *f_.bodyB, R(44, 800, 130, 24), has ? col::Text() : col::Muted());
+        const gp::RectF track = R(176, 808, 268, 6);
+        upSliderRect_ = track;
+        FillRound(g, track, S(3), col::Row());
+        if (has)
+        {
+            const float f = static_cast<float>(UpSharpValue()) / 100.0f;
+            FillRound(g, gp::RectF(track.X, track.Y, track.Width * f, track.Height), S(3), col::Accent());
+            const float kx = track.X + track.Width * f;
+            const float kr = S(8);
+            gp::SolidBrush knob(hover_ == kIdUpSlider || upSliding_ ? col::Accent2() : col::Accent());
+            g.FillEllipse(&knob, kx - kr, track.Y + track.Height / 2 - kr, kr * 2, kr * 2);
+            AddHit(R(168, 800, 284, 22), kIdUpSlider);
+            Text(g, std::to_wstring(UpSharpValue()) + L"%", *f_.chip, R(456, 800, 48, 22), col::Text(), 2);
+        }
+        else
+        {
+            Text(g, st_.upscale == 1 ? L"n/a" : L"off", *f_.chip, R(456, 800, 48, 22), col::Muted(), 2);
+        }
+    }
 
     // ---- game profile: save button + automatic apply ----
     {
