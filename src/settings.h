@@ -44,6 +44,7 @@ struct Settings
     int limitTarget = 0;      // RTSS limiter: 0 off, 1 game, 2 host, 3 global
     int limitMode = 1;        // RTSS limiter mode: 0 async, 1 front edge sync, 2 back edge sync
     int profileAuto = 0;      // apply a saved game profile automatically when its game is picked
+    int hideOsd = 1;          // turn the RTSS on-screen display of the game off while the host runs
     int limitAuto = 0;        // apply the RTSS limiter every time START is pressed
     int limitFps = 0;         // 0 refresh rate, -2 half refresh rate, else fixed fps
     int boost = 3;            // performance mode, read by the host at start-up: 0 off, 1 CPU, 2 CPU + GPU high, 3 max
@@ -122,6 +123,7 @@ inline void LoadSettings(Settings& s)
     if (s.limitTarget < 0 || s.limitTarget > 3) s.limitTarget = 0;
     s.limitFps = GetPrivateProfileIntW(L"Limiter", L"Fps", 0, path.c_str());
     s.profileAuto = GetPrivateProfileIntW(L"Profiles", L"Auto", 0, path.c_str()) != 0 ? 1 : 0;
+    s.hideOsd = GetPrivateProfileIntW(L"Limiter", L"HideOsd", 1, path.c_str()) != 0 ? 1 : 0;
     s.limitAuto = GetPrivateProfileIntW(L"Limiter", L"Auto", 0, path.c_str()) != 0 ? 1 : 0;
     s.limitMode = GetPrivateProfileIntW(L"Limiter", L"Mode", 1, path.c_str());
     if (s.limitMode < 0 || s.limitMode > 2) s.limitMode = 1;
@@ -171,6 +173,7 @@ inline void SaveSettings(const Settings& s)
     WritePrivateProfileStringW(L"Advanced", L"PresentDelayMs", std::to_wstring(s.presentDelay).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"Target", std::to_wstring(s.limitTarget).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Profiles", L"Auto", std::to_wstring(s.profileAuto).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"Limiter", L"HideOsd", std::to_wstring(s.hideOsd).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"Auto", std::to_wstring(s.limitAuto).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"Mode", std::to_wstring(s.limitMode).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"Fps", std::to_wstring(s.limitFps).c_str(), path.c_str());

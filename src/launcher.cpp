@@ -1094,6 +1094,75 @@ LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& g
     return out;
 }
 
+// RTSS on-screen display of the game's profile: off while the host runs (the host's overlay and RTSS's would sit on top of
+// each other), put back to what it was afterwards. 0 done, 1 RTSS did not take it (needs administrator rights), 2 not installed.
+int DoOsd(RtssApi& api, const std::wstring& exe, bool hide)
+{
+    if (exe.empty())
+        return 0;
+    const std::wstring dir = RtssInstallDir();
+    if (dir.empty() || !api.Open(dir))
+        return 2;
+    const std::wstring ini = oc::SettingsPath();
+    const std::string prof = Narrow(exe);
+    int want = 0;
+    wchar_t saved[260] = {};
+    GetPrivateProfileStringW(L"Rtss", L"OsdExe", L"", saved, 260, ini.c_str());
+    const bool pending = GetPrivateProfileIntW(L"Rtss", L"OsdHas", 0, ini.c_str()) != 0 && _wcsicmp(saved, exe.c_str()) == 0;
+    if (hide)
+    {
+        if (!pending)
+        {
+            int cur = api.Read(prof, "EnableOSD", -1);
+            if (cur < 0)
+                cur = api.Read("", "EnableOSD", 1);
+            WritePrivateProfileStringW(L"Rtss", L"OsdExe", exe.c_str(), ini.c_str());
+            WritePrivateProfileStringW(L"Rtss", L"OsdOrig", std::to_wstring(cur).c_str(), ini.c_str());
+            WritePrivateProfileStringW(L"Rtss", L"OsdHas", L"1", ini.c_str());
+        }
+        want = 0;
+    }
+    else
+    {
+        if (!pending)
+            return 0;
+        want = GetPrivateProfileIntW(L"Rtss", L"OsdOrig", 1, ini.c_str());
+    }
+    api.load(prof.c_str());
+    DWORD v = static_cast<DWORD>(want);
+    api.set("EnableOSD", reinterpret_cast<LPBYTE>(&v), sizeof(v));
+    api.save(prof.c_str());
+    api.update();
+    const int back = api.Read(prof, "EnableOSD", -1);
+    RtssLog(L"overlay of \"" + exe + L"\": " + (hide ? L"off" : L"restored to " + std::to_wstring(want)) + L", read back " + std::to_wstring(back));
+    if (back != want)
+        return 1;
+    if (!hide)
+        WritePrivateProfileStringW(L"Rtss", L"OsdHas", L"0", ini.c_str());
+    return 0;
+}
+
+int RunOsdElevated(const std::wstring& exe, bool hide)
+{
+    wchar_t self[MAX_PATH * 2] = {};
+    GetModuleFileNameW(nullptr, self, MAX_PATH * 2);
+    const std::wstring args = L"--rtss-osd \"" + exe + L"\" " + (hide ? L"hide" : L"show");
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";
+    sei.lpFile = self;
+    sei.lpParameters = args.c_str();
+    sei.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&sei) || !sei.hProcess)
+        return 1;
+    WaitForSingleObject(sei.hProcess, 30000);
+    DWORD code = 1;
+    GetExitCodeProcess(sei.hProcess, &code);
+    CloseHandle(sei.hProcess);
+    return static_cast<int>(code);
+}
+
 // Runs this program again, elevated, to write the RTSS profile (RTSS often needs administrator rights for that), so the
 // launcher itself can stay a normal program (an elevated launcher breaks the shortcuts of the games it starts).
 LimiterOut RunLimiterElevated(const std::wstring& gameExe, int hz, bool off)
@@ -1316,6 +1385,8 @@ class App
     }
     void ToggleBorderless();
     void ResizeGameWindow(bool quiet = false);
+    std::wstring osdExe_; // game whose RTSS overlay was turned off for this capture
+    void SetRtssOsd(bool hide);
     gp::RectF upSliderRect_{};
     bool upSliding_ = false;
     ULONGLONG upSliderSaved_ = 0;
@@ -1707,6 +1778,8 @@ void App::Start()
     if (IsIconic(game.hwnd))
         ShowWindow(game.hwnd, SW_RESTORE);
 
+    SetRtssOsd(true); // RTSS overlay off for this game while the host runs
+
     // Output scaling: make the game render small (monitor size / 1.5, 1.7 or 2) before the host starts; the host scales it up.
     if (st_.upscale != 0)
         ResizeGameWindow(true);
@@ -1788,6 +1861,7 @@ void App::PollHost()
         const bool asked = stopping_;
         stopping_ = false;
 
+        SetRtssOsd(false);
         if (upWnd_)
         {
             if (IsWindow(upWnd_))
@@ -1977,6 +2051,23 @@ void App::ToggleBorderless()
     border_.push_back(b);
     SetNote(L"Borderless is on. Press the button again to bring the frame back.", Note::Ok);
     Refresh();
+}
+
+void App::SetRtssOsd(bool hide)
+{
+    if (hide)
+    {
+        if (!st_.hideOsd || selected_ < 0 || selected_ >= static_cast<int>(games_.size()))
+            return;
+        osdExe_ = games_[selected_].exe;
+    }
+    if (osdExe_.empty())
+        return;
+    int r = DoOsd(rtss_, osdExe_, hide);
+    if (r == 1 && !IsElevated())
+        r = RunOsdElevated(osdExe_, hide);
+    if (!hide || r == 2)
+        osdExe_.clear();
 }
 
 // Output scaling: the game window is made as small as the chosen level asks (monitor size / 1.5, 1.7 or 2) and put in the
@@ -3247,6 +3338,7 @@ LRESULT App::OnMessage(UINT m, WPARAM w, LPARAM l)
 
     case WM_CLOSE:
         Stop(true);
+        SetRtssOsd(false);
         DestroyWindow(hwnd_);
         return 0;
 
@@ -3914,6 +4006,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
             if (!IsWindow(b.wnd))
                 return 1;
             return (on ? BorderApplyOn(b.wnd, b) : BorderApplyOff(b.wnd, b)) ? 0 : 1;
+        }
+        if (argv && argc >= 4 && wcscmp(argv[1], L"--rtss-osd") == 0)
+        {
+            const std::wstring exe = argv[2];
+            const bool hide = wcscmp(argv[3], L"hide") == 0;
+            LocalFree(argv);
+            RtssApi api;
+            return DoOsd(api, exe, hide);
         }
         if (argv && argc >= 4 && wcscmp(argv[1], L"--rtss-apply") == 0)
         {
