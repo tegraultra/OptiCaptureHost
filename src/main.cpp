@@ -58,6 +58,8 @@
 
 #include "settings.h"
 #include "upscale_shader.h"
+#include "nis_shader.h"
+#include "nis_config.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "winmm.lib")
@@ -501,6 +503,11 @@ class Host
     ComPtr<ID3D12PipelineState> upPsoBil_, upPsoEasu_, upPsoRcas_;
     ComPtr<ID3D12DescriptorHeap> upSrvHeap_, upRtvHeap_;
     ComPtr<ID3D12Resource> upMid_;
+    // NIS (NVIDIA Image Scaling): compute shader writes nisOut_, a pixel shader copies it to the back buffer.
+    ComPtr<ID3D12RootSignature> nisRoot_;
+    ComPtr<ID3D12PipelineState> nisPso_;
+    ComPtr<ID3D12Resource> nisOut_, nisCoef_[2], nisUpload_;
+    bool nisCoefDone_ = false;
     UINT upSrvInc_ = 0;
     UINT upRtvInc_ = 0;
     bool interactive_ = false;
@@ -826,8 +833,8 @@ bool Host::InitOverlayAndSwapChain()
         }
         if (upOn_)
         {
-            Log("Output scaling: %s, %ux%u -> %ux%u (sharpness %.2f)", st_.upscale == 1 ? "bilinear" : "FSR 1", width_, height_,
-                outW_, outH_, st_.upscaleSharp / 100.0);
+            Log("Output scaling: %s, %ux%u -> %ux%u (sharpness %.2f)", st_.upscale == 1 ? "bilinear" : (st_.upscale == 3 ? "NIS" : "FSR 1"), width_, height_,
+                outW_, outH_, (st_.upscale == 3 ? st_.nisSharp : st_.upscaleSharp) / 100.0);
         }
         else
         {
@@ -1114,7 +1121,7 @@ bool Host::InitUpscale()
     // Descriptor heaps: SRV 0 = the captured picture, SRV 1 = the EASU result; RTV 0 = the EASU result, 1.. = back buffers.
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 2;
+    hd.NumDescriptors = 6; // 0 captured picture, 1-2 NIS coefficients, 3 EASU result, 4 NIS output (UAV), 5 NIS output (SRV)
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev12_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&upSrvHeap_))))
         return false;
@@ -1151,9 +1158,153 @@ bool Host::InitUpscale()
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Texture2D.MipLevels = 1;
     D3D12_CPU_DESCRIPTOR_HANDLE h = upSrvHeap_->GetCPUDescriptorHandleForHeapStart();
-    h.ptr += upSrvInc_;
+    h.ptr += static_cast<SIZE_T>(upSrvInc_) * 3;
     dev12_->CreateShaderResourceView(upMid_.Get(), &sv, h);
     dev12_->CreateRenderTargetView(upMid_.Get(), nullptr, upRtvHeap_->GetCPUDescriptorHandleForHeapStart());
+
+    if (st_.upscale == 3)
+    {
+        nisRoot_.Reset();
+        nisPso_.Reset();
+        nisOut_.Reset();
+        nisCoef_[0].Reset();
+        nisCoef_[1].Reset();
+        nisUpload_.Reset();
+        nisCoefDone_ = false;
+
+        D3D12_DESCRIPTOR_RANGE nr[2]{};
+        nr[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        nr[0].NumDescriptors = 3;
+        nr[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        nr[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        nr[1].NumDescriptors = 1;
+        nr[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        D3D12_ROOT_PARAMETER np[3]{};
+        np[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        np[0].Constants.Num32BitValues = 28;
+        np[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        np[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        np[1].DescriptorTable.NumDescriptorRanges = 1;
+        np[1].DescriptorTable.pDescriptorRanges = &nr[0];
+        np[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        np[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        np[2].DescriptorTable.NumDescriptorRanges = 1;
+        np[2].DescriptorTable.pDescriptorRanges = &nr[1];
+        np[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        D3D12_STATIC_SAMPLER_DESC ns{};
+        ns.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        ns.AddressU = ns.AddressV = ns.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        ns.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        ns.MaxLOD = D3D12_FLOAT32_MAX;
+        ns.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        D3D12_ROOT_SIGNATURE_DESC nrs{};
+        nrs.NumParameters = 3;
+        nrs.pParameters = np;
+        nrs.NumStaticSamplers = 1;
+        nrs.pStaticSamplers = &ns;
+        ComPtr<ID3DBlob> nsig, nerr;
+        if (FAILED(D3D12SerializeRootSignature(&nrs, D3D_ROOT_SIGNATURE_VERSION_1, &nsig, &nerr)) ||
+            FAILED(dev12_->CreateRootSignature(0, nsig->GetBufferPointer(), nsig->GetBufferSize(), IID_PPV_ARGS(&nisRoot_))))
+        {
+            Log("NIS: root signature failed");
+            return false;
+        }
+        ComPtr<ID3DBlob> cs, ce;
+        const HRESULT ch = D3DCompile(kNisHlsl, kNisHlslLen, "nis.hlsl", nullptr, nullptr, "main", "cs_5_0",
+                                      D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &cs, &ce);
+        if (FAILED(ch))
+        {
+            Log("NIS: shader failed: 0x%08X %s", static_cast<unsigned>(ch), ce ? static_cast<const char*>(ce->GetBufferPointer()) : "");
+            return false;
+        }
+        D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
+        cd.pRootSignature = nisRoot_.Get();
+        cd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
+        if (FAILED(dev12_->CreateComputePipelineState(&cd, IID_PPV_ARGS(&nisPso_))))
+        {
+            Log("NIS: CreateComputePipelineState failed");
+            return false;
+        }
+
+        // Coefficient textures (2 x 64 texels, RGBA32F), filled from the first frame's command list.
+        D3D12_RESOURCE_DESC cr{};
+        cr.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        cr.Width = kFilterSize / 4;
+        cr.Height = kPhaseCount;
+        cr.DepthOrArraySize = 1;
+        cr.MipLevels = 1;
+        cr.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        cr.SampleDesc.Count = 1;
+        for (int i = 0; i < 2; ++i)
+            if (FAILED(dev12_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &cr, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                       IID_PPV_ARGS(&nisCoef_[i]))))
+            {
+                Log("NIS: coefficient texture failed");
+                return false;
+            }
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+        UINT rows = 0;
+        UINT64 rowBytes = 0, total = 0;
+        dev12_->GetCopyableFootprints(&cr, 0, 1, 0, &fp, &rows, &rowBytes, &total);
+        D3D12_HEAP_PROPERTIES up{};
+        up.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC ur{};
+        ur.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        ur.Width = total * 2;
+        ur.Height = 1;
+        ur.DepthOrArraySize = 1;
+        ur.MipLevels = 1;
+        ur.SampleDesc.Count = 1;
+        ur.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(dev12_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &ur, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&nisUpload_))))
+            return false;
+        unsigned char* map = nullptr;
+        if (FAILED(nisUpload_->Map(0, nullptr, reinterpret_cast<void**>(&map))))
+            return false;
+        for (int i = 0; i < 2; ++i)
+        {
+            const float* src = i == 0 ? &coef_scale[0][0] : &coef_usm[0][0];
+            for (UINT y = 0; y < kPhaseCount; ++y)
+                memcpy(map + static_cast<size_t>(i) * total + static_cast<size_t>(y) * fp.Footprint.RowPitch, src + y * kFilterSize,
+                       kFilterSize * sizeof(float));
+        }
+        nisUpload_->Unmap(0, nullptr);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC cv{};
+        cv.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        cv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        cv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        cv.Texture2D.MipLevels = 1;
+        for (int i = 0; i < 2; ++i)
+        {
+            D3D12_CPU_DESCRIPTOR_HANDLE ch2 = upSrvHeap_->GetCPUDescriptorHandleForHeapStart();
+            ch2.ptr += static_cast<SIZE_T>(upSrvInc_) * (1 + i);
+            dev12_->CreateShaderResourceView(nisCoef_[i].Get(), &cv, ch2);
+        }
+
+        // Output picture of the compute pass (RGBA8: typed UAV stores are always supported for it).
+        D3D12_RESOURCE_DESC orr = rd;
+        orr.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        orr.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        if (FAILED(dev12_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &orr, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+                                                   IID_PPV_ARGS(&nisOut_))))
+        {
+            Log("NIS: output texture failed");
+            return false;
+        }
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
+        uv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        D3D12_CPU_DESCRIPTOR_HANDLE uh = upSrvHeap_->GetCPUDescriptorHandleForHeapStart();
+        uh.ptr += static_cast<SIZE_T>(upSrvInc_) * 4;
+        dev12_->CreateUnorderedAccessView(nisOut_.Get(), nullptr, &uv, uh);
+        D3D12_SHADER_RESOURCE_VIEW_DESC ov = sv;
+        ov.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        D3D12_CPU_DESCRIPTOR_HANDLE oh = upSrvHeap_->GetCPUDescriptorHandleForHeapStart();
+        oh.ptr += static_cast<SIZE_T>(upSrvInc_) * 5;
+        dev12_->CreateShaderResourceView(nisOut_.Get(), &ov, oh);
+    }
     return true;
 }
 
@@ -1206,14 +1357,61 @@ void Host::RecordUpscale(ID3D12Resource* bb, UINT idx)
     dev12_->CreateRenderTargetView(bb, nullptr, bbRtv);
 
     D3D12_GPU_DESCRIPTOR_HANDLE srv0 = upSrvHeap_->GetGPUDescriptorHandleForHeapStart();
-    D3D12_GPU_DESCRIPTOR_HANDLE srv1 = srv0;
-    srv1.ptr += upSrvInc_;
+    auto slot = [&](UINT n) {
+        D3D12_GPU_DESCRIPTOR_HANDLE h = srv0;
+        h.ptr += static_cast<UINT64>(upSrvInc_) * n;
+        return h;
+    };
+    const D3D12_GPU_DESCRIPTOR_HANDLE srv1 = slot(3); // EASU result
 
     const float inW = static_cast<float>(width_);
     const float inH = static_cast<float>(height_);
     const float ouW = static_cast<float>(outW_);
     const float ouH = static_cast<float>(outH_);
     UINT c[16] = {};
+
+    D3D12_GPU_DESCRIPTOR_HANDLE finalSrc = srv0;
+    if (st_.upscale == 3 && nisPso_)
+    {
+        if (!nisCoefDone_)
+        {
+            // first frame: copy the filter tables into their textures
+            D3D12_RESOURCE_DESC cr = nisCoef_[0]->GetDesc();
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+            UINT rows = 0;
+            UINT64 rowBytes = 0, total = 0;
+            dev12_->GetCopyableFootprints(&cr, 0, 1, 0, &fp, &rows, &rowBytes, &total);
+            for (int i = 0; i < 2; ++i)
+            {
+                D3D12_TEXTURE_COPY_LOCATION dst{};
+                dst.pResource = nisCoef_[i].Get();
+                dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                dst.SubresourceIndex = 0;
+                D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+                srcLoc.pResource = nisUpload_.Get();
+                srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                srcLoc.PlacedFootprint = fp;
+                srcLoc.PlacedFootprint.Offset = static_cast<UINT64>(i) * total;
+                list_->CopyTextureRegion(&dst, 0, 0, 0, &srcLoc, nullptr);
+                barrier(nisCoef_[i].Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            }
+            nisCoefDone_ = true;
+        }
+        NISConfig cfg{};
+        NVScalerUpdateConfig(cfg, static_cast<float>(st_.nisSharp) / 100.0f, 0, 0, width_, height_, width_, height_, 0, 0, outW_, outH_,
+                             outW_, outH_);
+        barrier(nisOut_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list_->SetComputeRootSignature(nisRoot_.Get());
+        list_->SetPipelineState(nisPso_.Get());
+        list_->SetComputeRoot32BitConstants(0, 28, &cfg, 0);
+        list_->SetComputeRootDescriptorTable(1, srv0);
+        list_->SetComputeRootDescriptorTable(2, slot(4));
+        list_->Dispatch((outW_ + 31) / 32, (outH_ + 23) / 24, 1);
+        barrier(nisOut_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        finalSrc = slot(5);
+        list_->SetGraphicsRootSignature(upRoot_.Get());
+    }
 
     barrier(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
@@ -1258,7 +1456,7 @@ void Host::RecordUpscale(ID3D12Resource* bb, UINT idx)
         list_->OMSetRenderTargets(1, &bbRtv, FALSE, nullptr);
         list_->SetPipelineState(upPsoBil_.Get());
         list_->SetGraphicsRoot32BitConstants(0, 16, c, 0);
-        list_->SetGraphicsRootDescriptorTable(1, srv0);
+        list_->SetGraphicsRootDescriptorTable(1, finalSrc);
         list_->DrawInstanced(3, 1, 0, 0);
     }
 
