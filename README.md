@@ -44,3 +44,11 @@ Push to GitHub: the Actions workflow builds both exes and publishes `OptiCapture
 
 FSR 4 here runs 1:1 (no jitter): anti-aliasing / shimmer reduction, not resolution upscaling. Latency: one capture hop.
 OptiScaler, XeSS and FSR keep their own licences and are not included.
+
+## Output scaling (2.9.0, experimental)
+
+Run the game in a smaller window and let the host scale the picture up to the whole monitor before OptiScaler sees it.
+Choose FSR 1 (EASU + RCAS) or bilinear and a level (Quality 1.5x, Balanced 1.7x, Performance 2x) in the launcher, press
+Resize to shrink the selected game window, then START. Settings are in `[Upscale]` of OptiCaptureHost.ini
+(`Method` 0 off / 1 bilinear / 2 FSR 1, `Level` 0..2, `Sharpness` x100, 0 = sharpest, default 25). Applies at the next start.
+The mouse is not remapped: the pointer lands where it is on the real desktop, not on the scaled picture.

@@ -28,6 +28,7 @@
 
 #include <d3d11_4.h>
 #include <d3d12.h>
+#include <d3dcompiler.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
@@ -45,6 +46,7 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <cwchar>
 #include <cwctype>
@@ -55,7 +57,9 @@
 #include <vector>
 
 #include "settings.h"
+#include "upscale_shader.h"
 
+#pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "avrt.lib")
 
@@ -461,6 +465,10 @@ class Host
     bool InitGraphics();
     bool InitCapture();
     bool InitOverlayAndSwapChain();
+    bool InitUpscale();
+    bool CreateUpscaleViews();
+    void RecordUpscale(ID3D12Resource* bb, UINT idx);
+    void OverlayPlace(const RECT& game, int& x, int& y);
     bool CreateShared();
     bool PresentFrame(ID3D11Texture2D* src);
     bool ComputeCrop(UINT capW, UINT capH, int& cx, int& cy, UINT& w, UINT& h);
@@ -484,6 +492,17 @@ class Host
     HINSTANCE inst_ = nullptr;
     UINT width_ = 0;
     UINT height_ = 0;
+    // Output scaling (Upscale): the swap chain and the overlay are monitor sized and the captured picture is scaled up
+    // to them on the GPU (bilinear or FSR 1: EASU + RCAS). Without it outW_/outH_ equal width_/height_.
+    bool upOn_ = false;
+    UINT outW_ = 0;
+    UINT outH_ = 0;
+    ComPtr<ID3D12RootSignature> upRoot_;
+    ComPtr<ID3D12PipelineState> upPsoBil_, upPsoEasu_, upPsoRcas_;
+    ComPtr<ID3D12DescriptorHeap> upSrvHeap_, upRtvHeap_;
+    ComPtr<ID3D12Resource> upMid_;
+    UINT upSrvInc_ = 0;
+    UINT upRtvInc_ = 0;
     bool interactive_ = false;
     int menuKeyStage_ = 0; // 0 idle, 1 waiting to press the menu key, 2 waiting to release it
     std::chrono::steady_clock::time_point menuKeyAt_{};
@@ -791,13 +810,42 @@ bool Host::InitOverlayAndSwapChain()
     GetTargetBounds(target_, r);
     lastBounds_ = r;
 
+    // Output scaling: monitor sized swap chain and overlay. Falls back to the normal 1:1 path if the shaders fail.
+    upOn_ = false;
+    outW_ = width_;
+    outH_ = height_;
+    if (st_.upscale != 0)
+    {
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(MonitorFromWindow(target_, MONITOR_DEFAULTTONEAREST), &mi))
+        {
+            outW_ = static_cast<UINT>(mi.rcMonitor.right - mi.rcMonitor.left);
+            outH_ = static_cast<UINT>(mi.rcMonitor.bottom - mi.rcMonitor.top);
+            upOn_ = InitUpscale();
+        }
+        if (upOn_)
+        {
+            Log("Output scaling: %s, %ux%u -> %ux%u (sharpness %.2f)", st_.upscale == 1 ? "bilinear" : "FSR 1", width_, height_,
+                outW_, outH_, st_.upscaleSharp / 100.0);
+        }
+        else
+        {
+            outW_ = width_;
+            outH_ = height_;
+            Log("Output scaling could not start, running 1:1");
+        }
+    }
+    int ovX = 0, ovY = 0;
+    OverlayPlace(r, ovX, ovY);
+
     DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (opt_.noLayered ? 0 : WS_EX_LAYERED);
     if (opt_.clickThrough && !opt_.noLayered)
         ex |= WS_EX_TRANSPARENT;
     interactive_ = !opt_.clickThrough;
 
-    overlay_ = CreateWindowExW(ex, wc.lpszClassName, L"OptiCaptureHost", WS_POPUP, r.left + cropX_, r.top + cropY_, static_cast<int>(width_),
-                               static_cast<int>(height_), nullptr, nullptr, inst_, nullptr);
+    overlay_ = CreateWindowExW(ex, wc.lpszClassName, L"OptiCaptureHost", WS_POPUP, ovX, ovY, static_cast<int>(outW_),
+                               static_cast<int>(outH_), nullptr, nullptr, inst_, nullptr);
     if (!overlay_)
     {
         Log("CreateWindowEx failed: %lu", GetLastError());
@@ -821,8 +869,8 @@ bool Host::InitOverlayAndSwapChain()
         swapFlags_ |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
     DXGI_SWAP_CHAIN_DESC1 sd{};
-    sd.Width = width_;
-    sd.Height = height_;
+    sd.Width = outW_;
+    sd.Height = outH_;
     sd.Format = kFormat;
     sd.SampleDesc.Count = 1;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -949,7 +997,272 @@ bool Host::CreateShared()
         Log("OpenSharedHandle (texture) failed: 0x%08X", static_cast<unsigned>(hr));
         return false;
     }
+    if (upOn_ && !CreateUpscaleViews())
+        return false;
     return true;
+}
+
+// ---- Output scaling ---------------------------------------------------------------------------------------------
+// Where the overlay window goes: on the game's picture, or, with output scaling, over the whole monitor the game is on.
+void Host::OverlayPlace(const RECT& game, int& x, int& y)
+{
+    if (upOn_)
+    {
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(MonitorFromWindow(target_, MONITOR_DEFAULTTONEAREST), &mi))
+        {
+            x = mi.rcMonitor.left;
+            y = mi.rcMonitor.top;
+            return;
+        }
+    }
+    x = game.left + cropX_;
+    y = game.top + cropY_;
+}
+
+bool Host::InitUpscale()
+{
+    upRoot_.Reset();
+    upPsoBil_.Reset();
+    upPsoEasu_.Reset();
+    upPsoRcas_.Reset();
+    upSrvHeap_.Reset();
+    upRtvHeap_.Reset();
+    upMid_.Reset();
+
+    // Root signature: 16 root constants (b0) and one SRV table (t0), static linear clamp sampler (s0).
+    D3D12_DESCRIPTOR_RANGE range{};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range.NumDescriptors = 1;
+    range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    D3D12_ROOT_PARAMETER rp[2]{};
+    rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rp[0].Constants.Num32BitValues = 16;
+    rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rp[1].DescriptorTable.NumDescriptorRanges = 1;
+    rp[1].DescriptorTable.pDescriptorRanges = &range;
+    rp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_STATIC_SAMPLER_DESC ss{};
+    ss.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    ss.AddressU = ss.AddressV = ss.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    ss.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    ss.MaxLOD = D3D12_FLOAT32_MAX;
+    ss.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_ROOT_SIGNATURE_DESC rsd{};
+    rsd.NumParameters = 2;
+    rsd.pParameters = rp;
+    rsd.NumStaticSamplers = 1;
+    rsd.pStaticSamplers = &ss;
+    rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS | D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS | D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
+    ComPtr<ID3DBlob> sig, err;
+    HRESULT hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err);
+    if (FAILED(hr))
+    {
+        Log("Upscale: root signature failed: 0x%08X", static_cast<unsigned>(hr));
+        return false;
+    }
+    hr = dev12_->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&upRoot_));
+    if (FAILED(hr))
+    {
+        Log("Upscale: CreateRootSignature failed: 0x%08X", static_cast<unsigned>(hr));
+        return false;
+    }
+
+    // Shaders (FSR 1 source from AMD FidelityFX, MIT licence), compiled once at start.
+    auto compile = [&](const char* entry, const char* target, ComPtr<ID3DBlob>& out) {
+        ComPtr<ID3DBlob> e;
+        const HRESULT h = D3DCompile(kUpscaleHlsl, kUpscaleHlslLen, "upscale.hlsl", nullptr, nullptr, entry, target,
+                                     D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &out, &e);
+        if (FAILED(h))
+        {
+            Log("Upscale: shader %s failed: 0x%08X %s", entry, static_cast<unsigned>(h),
+                e ? static_cast<const char*>(e->GetBufferPointer()) : "");
+            return false;
+        }
+        return true;
+    };
+    ComPtr<ID3DBlob> vs, psB, psE, psR;
+    if (!compile("VSMain", "vs_5_0", vs) || !compile("PSBilinear", "ps_5_0", psB) || !compile("PSEasu", "ps_5_0", psE) ||
+        !compile("PSRcas", "ps_5_0", psR))
+        return false;
+
+    auto makePso = [&](ID3DBlob* ps, ComPtr<ID3D12PipelineState>& pso) {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature = upRoot_.Get();
+        pd.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+        pd.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+        pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        pd.SampleMask = UINT_MAX;
+        pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        pd.RasterizerState.DepthClipEnable = TRUE;
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pd.NumRenderTargets = 1;
+        pd.RTVFormats[0] = kFormat;
+        pd.SampleDesc.Count = 1;
+        const HRESULT h = dev12_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso));
+        if (FAILED(h))
+            Log("Upscale: CreateGraphicsPipelineState failed: 0x%08X", static_cast<unsigned>(h));
+        return SUCCEEDED(h);
+    };
+    if (!makePso(psB.Get(), upPsoBil_) || !makePso(psE.Get(), upPsoEasu_) || !makePso(psR.Get(), upPsoRcas_))
+        return false;
+
+    // Descriptor heaps: SRV 0 = the captured picture, SRV 1 = the EASU result; RTV 0 = the EASU result, 1.. = back buffers.
+    D3D12_DESCRIPTOR_HEAP_DESC hd{};
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    hd.NumDescriptors = 2;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(dev12_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&upSrvHeap_))))
+        return false;
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    hd.NumDescriptors = 1 + 32;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    if (FAILED(dev12_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&upRtvHeap_))))
+        return false;
+    upSrvInc_ = dev12_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    upRtvInc_ = dev12_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
+    // Intermediate picture at output size (EASU writes it, RCAS reads it).
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = outW_;
+    rd.Height = outH_;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels = 1;
+    rd.Format = kFormat;
+    rd.SampleDesc.Count = 1;
+    rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    hr = dev12_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+                                         IID_PPV_ARGS(&upMid_));
+    if (FAILED(hr))
+    {
+        Log("Upscale: intermediate texture failed: 0x%08X", static_cast<unsigned>(hr));
+        return false;
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = kFormat;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2D.MipLevels = 1;
+    D3D12_CPU_DESCRIPTOR_HANDLE h = upSrvHeap_->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += upSrvInc_;
+    dev12_->CreateShaderResourceView(upMid_.Get(), &sv, h);
+    dev12_->CreateRenderTargetView(upMid_.Get(), nullptr, upRtvHeap_->GetCPUDescriptorHandleForHeapStart());
+    return true;
+}
+
+// The shared texture is recreated whenever the game's picture size changes: point SRV 0 at the new one.
+bool Host::CreateUpscaleViews()
+{
+    if (!upSrvHeap_ || !shared12_)
+        return false;
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = kFormat;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2D.MipLevels = 1;
+    dev12_->CreateShaderResourceView(shared12_.Get(), &sv, upSrvHeap_->GetCPUDescriptorHandleForHeapStart());
+    return true;
+}
+
+static UINT FloatBits(float f)
+{
+    UINT u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+// Records the scaling passes into list_: bilinear (one pass) or FSR 1 (EASU into the intermediate, RCAS into the back buffer).
+void Host::RecordUpscale(ID3D12Resource* bb, UINT idx)
+{
+    auto barrier = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = r;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = from;
+        b.Transition.StateAfter = to;
+        list_->ResourceBarrier(1, &b);
+    };
+
+    ID3D12DescriptorHeap* heaps[] = { upSrvHeap_.Get() };
+    list_->SetDescriptorHeaps(1, heaps);
+    list_->SetGraphicsRootSignature(upRoot_.Get());
+    list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    D3D12_VIEWPORT vp{ 0.0f, 0.0f, static_cast<float>(outW_), static_cast<float>(outH_), 0.0f, 1.0f };
+    D3D12_RECT sc{ 0, 0, static_cast<LONG>(outW_), static_cast<LONG>(outH_) };
+    list_->RSSetViewports(1, &vp);
+    list_->RSSetScissorRects(1, &sc);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE midRtv = upRtvHeap_->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE bbRtv = midRtv;
+    bbRtv.ptr += static_cast<SIZE_T>(1 + (idx & 31)) * upRtvInc_;
+    dev12_->CreateRenderTargetView(bb, nullptr, bbRtv);
+
+    D3D12_GPU_DESCRIPTOR_HANDLE srv0 = upSrvHeap_->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE srv1 = srv0;
+    srv1.ptr += upSrvInc_;
+
+    const float inW = static_cast<float>(width_);
+    const float inH = static_cast<float>(height_);
+    const float ouW = static_cast<float>(outW_);
+    const float ouH = static_cast<float>(outH_);
+    UINT c[16] = {};
+
+    barrier(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+    if (st_.upscale == 2)
+    {
+        // EASU: edge adaptive upscale, captured picture -> intermediate (output size)
+        c[0] = FloatBits(inW / ouW);
+        c[1] = FloatBits(inH / ouH);
+        c[2] = FloatBits(0.5f * inW / ouW - 0.5f);
+        c[3] = FloatBits(0.5f * inH / ouH - 0.5f);
+        c[4] = FloatBits(1.0f / inW);
+        c[5] = FloatBits(1.0f / inH);
+        c[6] = FloatBits(1.0f / inW);
+        c[7] = FloatBits(-1.0f / inH);
+        c[8] = FloatBits(-1.0f / inW);
+        c[9] = FloatBits(2.0f / inH);
+        c[10] = FloatBits(1.0f / inW);
+        c[11] = FloatBits(2.0f / inH);
+        c[12] = 0;
+        c[13] = FloatBits(4.0f / inH);
+        barrier(upMid_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        list_->OMSetRenderTargets(1, &midRtv, FALSE, nullptr);
+        list_->SetPipelineState(upPsoEasu_.Get());
+        list_->SetGraphicsRoot32BitConstants(0, 16, c, 0);
+        list_->SetGraphicsRootDescriptorTable(1, srv0);
+        list_->DrawInstanced(3, 1, 0, 0);
+        barrier(upMid_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        // RCAS: sharpen, intermediate -> back buffer
+        UINT r[16] = {};
+        r[0] = FloatBits(std::exp2(-static_cast<float>(st_.upscaleSharp) / 100.0f));
+        list_->OMSetRenderTargets(1, &bbRtv, FALSE, nullptr);
+        list_->SetPipelineState(upPsoRcas_.Get());
+        list_->SetGraphicsRoot32BitConstants(0, 16, r, 0);
+        list_->SetGraphicsRootDescriptorTable(1, srv1);
+        list_->DrawInstanced(3, 1, 0, 0);
+    }
+    else
+    {
+        c[0] = FloatBits(1.0f / ouW);
+        c[1] = FloatBits(1.0f / ouH);
+        list_->OMSetRenderTargets(1, &bbRtv, FALSE, nullptr);
+        list_->SetPipelineState(upPsoBil_.Get());
+        list_->SetGraphicsRoot32BitConstants(0, 16, c, 0);
+        list_->SetGraphicsRootDescriptorTable(1, srv0);
+        list_->DrawInstanced(3, 1, 0, 0);
+    }
+
+    barrier(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
 }
 
 void Host::WaitFenceValue(UINT64 v)
@@ -1076,19 +1389,26 @@ bool Host::PresentFrame(ID3D11Texture2D* src)
     if (tsHeap_)
         list_->EndQuery(tsHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, idx * 2);
 
-    D3D12_RESOURCE_BARRIER b{};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    b.Transition.pResource = bb.Get();
-    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    b.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-    list_->ResourceBarrier(1, &b);
+    if (upOn_)
+    {
+        RecordUpscale(bb.Get(), idx);
+    }
+    else
+    {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = bb.Get();
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        list_->ResourceBarrier(1, &b);
 
-    list_->CopyResource(bb.Get(), shared12_.Get());
+        list_->CopyResource(bb.Get(), shared12_.Get());
 
-    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    b.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-    list_->ResourceBarrier(1, &b);
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        list_->ResourceBarrier(1, &b);
+    }
 
     if (tsHeap_)
     {
@@ -1225,11 +1545,17 @@ bool Host::ApplyGeometry(UINT capW, UINT capH)
         if (!CreateShared())
             return false;
 
-        HRESULT hr = swap_->ResizeBuffers(0, width_, height_, DXGI_FORMAT_UNKNOWN, swapFlags_);
-        if (FAILED(hr))
+        // With output scaling the swap chain stays monitor sized, only the shared texture (the scaler's input) changes.
+        if (!upOn_)
         {
-            Log("ResizeBuffers failed: 0x%08X", static_cast<unsigned>(hr));
-            return false;
+            outW_ = width_;
+            outH_ = height_;
+            HRESULT hr = swap_->ResizeBuffers(0, width_, height_, DXGI_FORMAT_UNKNOWN, swapFlags_);
+            if (FAILED(hr))
+            {
+                Log("ResizeBuffers failed: 0x%08X", static_cast<unsigned>(hr));
+                return false;
+            }
         }
     }
 
@@ -1284,10 +1610,12 @@ void Host::MoveOverlay()
 
     // OptiScaler can also move or resize the window it presents to (its "Force Borderless" option): put it back on
     // the game's picture.
+    int ovX = 0, ovY = 0;
+    OverlayPlace(r, ovX, ovY);
     RECT orc{};
     if (GetWindowRect(overlay_, &orc) &&
-        (orc.left != r.left + cropX_ || orc.top != r.top + cropY_ || orc.right - orc.left != static_cast<LONG>(width_) ||
-         orc.bottom - orc.top != static_cast<LONG>(height_)))
+        (orc.left != ovX || orc.top != ovY || orc.right - orc.left != static_cast<LONG>(outW_) ||
+         orc.bottom - orc.top != static_cast<LONG>(outH_)))
     {
         lastBounds_ = {};
     }
@@ -1295,8 +1623,7 @@ void Host::MoveOverlay()
     if (r.left != lastBounds_.left || r.top != lastBounds_.top || r.right != lastBounds_.right || r.bottom != lastBounds_.bottom)
     {
         lastBounds_ = r;
-        SetWindowPos(overlay_, HWND_TOPMOST, r.left + cropX_, r.top + cropY_, static_cast<int>(width_), static_cast<int>(height_),
-                     SWP_NOACTIVATE);
+        SetWindowPos(overlay_, HWND_TOPMOST, ovX, ovY, static_cast<int>(outW_), static_cast<int>(outH_), SWP_NOACTIVATE);
     }
     else
     {

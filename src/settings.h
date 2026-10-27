@@ -35,6 +35,9 @@ struct Settings
     UINT fpsCycleKey = VK_NEXT;  // FPS overlay type (FpsCycleShortcutKey)
     UINT fgKey = VK_END;         // frame generation on/off (FGShortcutKey)
     int presentMode = 3;      // 0 auto (FG on: no wait, FG off: VSync), 1 always interval 0, 2 always interval 1, 3 classic 2.2.0 behaviour, 4 Lossless-style (tearing, latency 1), 5 classic + exactly refresh/2 base frames, 6 classic + unlimited capture (no half-refresh limit)
+    int upscale = 0;          // output scaling: 0 off, 1 bilinear, 2 FSR1 (EASU+RCAS); read at start
+    int upscaleLevel = 1;     // input size: 0 Quality 67%, 1 Balanced 58%, 2 Performance 50% (launcher resizes the window)
+    int upscaleSharp = 25;    // FSR1 RCAS sharpness x100 (0 = sharpest, 200 = none), default 0.25
     int presentDelay = 3;     // ms the host holds each frame before Present, 0..12
     int limitTarget = 0;      // RTSS limiter: 0 off, 1 game, 2 host, 3 global
     int limitMode = 1;        // RTSS limiter mode: 0 async, 1 front edge sync, 2 back edge sync
@@ -101,6 +104,12 @@ inline void LoadSettings(Settings& s)
 
     s.presentMode = GetPrivateProfileIntW(L"Advanced", L"PresentMode", 3, path.c_str());
     if (s.presentMode < 0 || s.presentMode > 6) s.presentMode = 3;
+    s.upscale = GetPrivateProfileIntW(L"Upscale", L"Method", 0, path.c_str());
+    if (s.upscale < 0 || s.upscale > 2) s.upscale = 0;
+    s.upscaleLevel = GetPrivateProfileIntW(L"Upscale", L"Level", 1, path.c_str());
+    if (s.upscaleLevel < 0 || s.upscaleLevel > 2) s.upscaleLevel = 1;
+    s.upscaleSharp = GetPrivateProfileIntW(L"Upscale", L"Sharpness", 25, path.c_str());
+    if (s.upscaleSharp < 0 || s.upscaleSharp > 200) s.upscaleSharp = 25;
     s.presentDelay = GetPrivateProfileIntW(L"Advanced", L"PresentDelayMs", 3, path.c_str());
     if (s.presentDelay < 0 || s.presentDelay > 12) s.presentDelay = 3;
     s.limitTarget = GetPrivateProfileIntW(L"Limiter", L"Target", 0, path.c_str());
@@ -148,6 +157,9 @@ inline void SaveSettings(const Settings& s)
     WritePrivateProfileStringW(L"Settings", L"FrameGenMode", std::to_wstring(s.frameGenMode).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Settings", L"UpscalerMode", std::to_wstring(s.upscalerMode).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Advanced", L"PresentMode", std::to_wstring(s.presentMode).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"Upscale", L"Method", std::to_wstring(s.upscale).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"Upscale", L"Level", std::to_wstring(s.upscaleLevel).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"Upscale", L"Sharpness", std::to_wstring(s.upscaleSharp).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Advanced", L"PresentDelayMs", std::to_wstring(s.presentDelay).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"Target", std::to_wstring(s.limitTarget).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Profiles", L"Auto", std::to_wstring(s.profileAuto).c_str(), path.c_str());

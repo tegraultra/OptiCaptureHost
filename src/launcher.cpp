@@ -90,6 +90,9 @@ constexpr int kIdPictureOn = 27;
 constexpr int kIdPictureOff = 28;
 constexpr int kIdProfileSave = 29;
 constexpr int kIdProfileAuto = 30;
+constexpr int kIdUpSelect = 31;
+constexpr int kIdUpResize = 32;
+constexpr int kUpMenuBase = 5900;
 const wchar_t* const kProfilesDir = L"Game Profiles"; // next to the launcher: one folder per game
 constexpr int kLimitModeMenuBase = 5800;
 constexpr int kLimitTargetMenuBase = 5500;
@@ -1311,6 +1314,7 @@ class App
         return -1;
     }
     void ToggleBorderless();
+    void ResizeGameWindow();
     bool dlgProfile_ = false;     // the dialog is the "apply the saved profile?" question
     std::wstring profileExe_;     // the game that question is about
     int lastOffered_ = -1;
@@ -1936,6 +1940,47 @@ void App::ToggleBorderless()
     border_.push_back(b);
     SetNote(L"Borderless is on. Press the button again to bring the frame back.", Note::Ok);
     Refresh();
+}
+
+// Output scaling: the game window is made as small as the chosen level asks (monitor size / 1.5, 1.7 or 2) and put in the
+// top left corner of its monitor; the host then scales the picture back up to the whole monitor.
+void App::ResizeGameWindow()
+{
+    if (selected_ < 0 || selected_ >= static_cast<int>(games_.size()))
+    {
+        SetNote(L"Pick a game first.", Note::Info);
+        return;
+    }
+    HWND w = games_[selected_].hwnd;
+    if (!IsWindow(w))
+    {
+        SetNote(L"That window is gone. Press Refresh.", Note::Error);
+        return;
+    }
+    if (IsZoomed(w) || IsIconic(w))
+        ShowWindow(w, SW_RESTORE);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST), &mi))
+        return;
+    static const double factor[] = { 1.5, 1.7, 2.0 };
+    const double f = factor[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 2) ? st_.upscaleLevel : 1];
+    const int mw = mi.rcMonitor.right - mi.rcMonitor.left;
+    const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    const int cw = (static_cast<int>(mw / f + 0.5)) & ~1;
+    const int ch = (static_cast<int>(mh / f + 0.5)) & ~1;
+    RECT rc{ 0, 0, cw, ch };
+    AdjustWindowRectEx(&rc, static_cast<DWORD>(GetWindowLongPtrW(w, GWL_STYLE)), FALSE, static_cast<DWORD>(GetWindowLongPtrW(w, GWL_EXSTYLE)));
+    SetWindowPos(w, nullptr, mi.rcMonitor.left, mi.rcMonitor.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER | SWP_NOACTIVATE);
+    RECT cr{};
+    GetClientRect(w, &cr);
+    if (cr.right - cr.left == cw && cr.bottom - cr.top == ch)
+        SetNote(L"Game window is now " + std::to_wstring(cw) + L"x" + std::to_wstring(ch) + L". The host scales it to " +
+                    std::to_wstring(mw) + L"x" + std::to_wstring(mh) + L".", Note::Ok);
+    else
+        SetNote(L"Window is now " + std::to_wstring(cr.right - cr.left) + L"x" + std::to_wstring(cr.bottom - cr.top) +
+                    L" (wanted " + std::to_wstring(cw) + L"x" + std::to_wstring(ch) + L"). Set the game's own resolution if it differs.",
+                Note::Info);
 }
 
 // Folder of the saved profile of a game: <launcher folder>\Game Profiles\<exe name without .exe>
@@ -2719,6 +2764,47 @@ void App::OnClick(int id)
     {
         ToggleBorderless();
     }
+    else if (id == kIdUpResize)
+    {
+        ResizeGameWindow();
+    }
+    else if (id == kIdUpSelect)
+    {
+        static const wchar_t* lv[] = { L"Quality  (1.5x, 1080p \u2192 720p)", L"Balanced  (1.7x, 1080p \u2192 635p)",
+                                       L"Performance  (2x, 1080p \u2192 540p)" };
+        HMENU menu = CreatePopupMenu();
+        if (menu)
+        {
+            AppendMenuW(menu, MF_STRING | (st_.upscale == 0 ? MF_CHECKED : 0), kUpMenuBase, L"Off");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            for (int m = 0; m < 2; ++m)
+                for (int l = 0; l < 3; ++l)
+                {
+                    const int method = m == 0 ? 2 : 1; // FSR 1 first, then bilinear
+                    std::wstring t = std::wstring(m == 0 ? L"FSR 1  \u00B7  " : L"Bilinear  \u00B7  ") + lv[l];
+                    AppendMenuW(menu, MF_STRING | ((st_.upscale == method && st_.upscaleLevel == l) ? MF_CHECKED : 0),
+                                kUpMenuBase + 1 + m * 3 + l, t.c_str());
+                }
+            POINT pt{};
+            GetCursorPos(&pt);
+            const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
+            DestroyMenu(menu);
+            if (cmd == static_cast<UINT>(kUpMenuBase))
+            {
+                st_.upscale = 0;
+                Save();
+                SetNote(L"Output scaling is off.", Note::Ok);
+            }
+            else if (cmd > static_cast<UINT>(kUpMenuBase) && cmd <= static_cast<UINT>(kUpMenuBase + 6))
+            {
+                const int k = static_cast<int>(cmd) - kUpMenuBase - 1;
+                st_.upscale = (k / 3 == 0) ? 2 : 1;
+                st_.upscaleLevel = k % 3;
+                Save();
+                SetNote(L"Press Resize to make the game window that small, then START (applies at the next start).", Note::Info);
+            }
+        }
+    }
     else if (id == kIdLimitOff)
     {
         st_.limitAuto = 0; // otherwise START would switch it on again
@@ -3199,7 +3285,7 @@ void App::Paint(HDC dc, int W, int H)
     }
 
     // ---- games card ----
-    const gp::RectF left = R(24, 100, 500, 698);
+    const gp::RectF left = R(24, 100, 500, 718);
     Card(g, left);
     Text(g, L"Choose a game", *f_.h2, R(44, 112, 300, 24), col::Text());
     Text(g, L"Pick the window of the game you want to enhance", *f_.sm, R(44, 136, 340, 18), col::Muted());
@@ -3353,13 +3439,39 @@ void App::Paint(HDC dc, int W, int H)
         AddHit(selector, kIdDelaySelect);
     }
 
-    Text(g, L"Tip: run the game in Borderless or Windowed mode, not Exclusive Fullscreen.", *f_.tiny, R(44, 732, 460, 22),
+    // ---- output scaling ----
+    {
+        static const wchar_t* lvN[] = { L"Quality", L"Balanced", L"Performance" };
+        Text(g, L"Output scaling", *f_.bodyB, R(44, 738, 130, 24), col::Text());
+
+        const gp::RectF selector = R(176, 734, 232, 32);
+        const bool hot = hover_ == kIdUpSelect;
+        FillRound(g, selector, S(8), hot ? col::RowHot() : col::Row());
+        StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
+        std::wstring t = L"Off";
+        if (st_.upscale != 0)
+            t = std::wstring(st_.upscale == 2 ? L"FSR 1  \u00B7  " : L"Bilinear  \u00B7  ") +
+                lvN[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 2) ? st_.upscaleLevel : 1];
+        Text(g, t, *f_.chip, R(186, 740, 212, 22), col::Text());
+        AddHit(selector, kIdUpSelect);
+
+        const bool pick = selected_ >= 0 && selected_ < static_cast<int>(games_.size());
+        const gp::RectF rb = R(416, 734, 88, 32);
+        const bool hotR = hover_ == kIdUpResize && pick;
+        FillRound(g, rb, S(8), hotR ? col::RowHot() : col::Row());
+        StrokeRound(g, rb, S(8), hotR ? col::Accent() : col::Line(), max(1.0f, S(1)));
+        Text(g, L"Resize", *f_.chip, rb, pick ? col::Text() : col::Muted(), 1);
+        if (pick)
+            AddHit(rb, kIdUpResize);
+    }
+
+    Text(g, L"Tip: run the game in Borderless or Windowed mode, not Exclusive Fullscreen.", *f_.tiny, R(44, 800, 460, 16),
          col::Muted(), 0, true);
 
     // ---- game profile: save button + automatic apply ----
     {
         const bool pick = selected_ >= 0 && selected_ < static_cast<int>(games_.size());
-        const gp::RectF sb = R(44, 764, 190, 28);
+        const gp::RectF sb = R(44, 770, 190, 28);
         const bool hotS = hover_ == kIdProfileSave && pick;
         FillRound(g, sb, S(8), hotS ? col::Accent2() : col::Accent());
         StrokeRound(g, sb, S(8), col::Line(), max(1.0f, S(1)));
@@ -3367,14 +3479,14 @@ void App::Paint(HDC dc, int W, int H)
         if (pick)
             AddHit(sb, kIdProfileSave);
 
-        const gp::RectF box = R(252, 769, 18, 18);
+        const gp::RectF box = R(252, 775, 18, 18);
         const bool hotA = hover_ == kIdProfileAuto;
         FillRound(g, box, S(5), st_.profileAuto ? col::Accent() : col::Row());
         StrokeRound(g, box, S(5), hotA ? col::Accent2() : col::Line(), max(1.0f, S(1)));
         if (st_.profileAuto)
             Text(g, L"\u2713", *f_.chip, box, col::White(), 1);
-        Text(g, L"Apply saved profiles automatically", *f_.sm, R(276, 767, 240, 22), col::Text());
-        AddHit(R(250, 764, 270, 28), kIdProfileAuto);
+        Text(g, L"Apply saved profiles automatically", *f_.sm, R(276, 773, 240, 22), col::Text());
+        AddHit(R(250, 770, 270, 28), kIdProfileAuto);
     }
 
     // ---- VSync card ----
