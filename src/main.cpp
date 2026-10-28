@@ -560,7 +560,7 @@ class Host
     ffxContext ffxCtx_ = nullptr;
     ComPtr<ID3D12RootSignature> fsrRoot_;
     ComPtr<ID3D12PipelineState> fsrBlockPso_, fsrPixelPso_;
-    ComPtr<ID3D12Resource> fsrTex_[2], fsrBlk_, fsrMv_, fsrDepth_, fsrOut_;
+    ComPtr<ID3D12Resource> fsrTex_[2], fsrBlk_, fsrMv_, fsrDepth_, fsrReact_, fsrOut_;
     bool fsrPipesOk_ = false;
     bool fsrReady_ = false;
     bool fsrHavePrev_ = false;
@@ -1245,8 +1245,8 @@ bool Host::InitUpscale()
     // Descriptor heaps: SRV 0 = the captured picture, SRV 1 = the EASU result; RTV 0 = the EASU result, 1.. = back buffers.
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 16; // 0 captured picture, 1-2 NIS coefficients, 3 EASU result, 4 NIS output (UAV), 5 NIS output (SRV),
-                            // 6 temporal FSR output (SRV), 7-9 flow inputs (frame A, B, block vectors), 10-12 flow outputs (UAV), 13-15 flow inputs (B, A, block vectors)
+    hd.NumDescriptors = 17; // 0 captured picture, 1-2 NIS coefficients, 3 EASU result, 4 NIS output (UAV), 5 NIS output (SRV),
+                            // 6 temporal FSR output (SRV), 7-9 flow inputs (frame A, B, block vectors), 10-13 flow outputs (UAV: block vectors, vectors, depth, reactive mask), 14-16 flow inputs (B, A, block vectors)
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev12_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&upSrvHeap_))))
         return false;
@@ -1446,7 +1446,7 @@ bool Host::InitFsrPipelines()
     ranges[0].NumDescriptors = 3;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 3;
+    ranges[1].NumDescriptors = 4;
     ranges[1].OffsetInDescriptorsFromTableStart = 0;
     D3D12_ROOT_PARAMETER rp[3]{};
     rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -1509,6 +1509,7 @@ void Host::ReleaseFsrTemporal()
     fsrBlk_.Reset();
     fsrMv_.Reset();
     fsrDepth_.Reset();
+    fsrReact_.Reset();
     fsrOut_.Reset();
 }
 
@@ -1584,6 +1585,7 @@ bool Host::InitFsrTemporal()
         !make(fsrBlk_, bw, bh, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, nps) ||
         !make(fsrMv_, width_, height_, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, nps) ||
         !make(fsrDepth_, width_, height_, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, nps) ||
+        !make(fsrReact_, width_, height_, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, nps) ||
         !make(fsrOut_, outW_, outH_, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE))
     {
@@ -1619,9 +1621,10 @@ bool Host::InitFsrTemporal()
     uav(fsrBlk_.Get(), DXGI_FORMAT_R16G16_FLOAT, 10);
     uav(fsrMv_.Get(), DXGI_FORMAT_R16G16_FLOAT, 11);
     uav(fsrDepth_.Get(), DXGI_FORMAT_R32_FLOAT, 12);
-    srv(fsrTex_[1].Get(), kFormat, 13);
-    srv(fsrTex_[0].Get(), kFormat, 14);
-    srv(fsrBlk_.Get(), DXGI_FORMAT_R16G16_FLOAT, 15);
+    uav(fsrReact_.Get(), DXGI_FORMAT_R8_UNORM, 13);
+    srv(fsrTex_[1].Get(), kFormat, 14);
+    srv(fsrTex_[0].Get(), kFormat, 15);
+    srv(fsrBlk_.Get(), DXGI_FORMAT_R16G16_FLOAT, 16);
 
     // AMD's upscaling context: gamma-encoded colour (the frame as the game shows it), no jitter, flat depth
     ffxCreateBackendDX12Desc backendDesc{};
@@ -1694,7 +1697,7 @@ void Host::RecordFsrTemporal()
     const UINT bw = (width_ + 3) / 4, bh = (height_ + 3) / 4;
     const UINT consts[4] = { width_, height_, bw, bh };
     list_->SetComputeRoot32BitConstants(0, 4, consts, 0);
-    list_->SetComputeRootDescriptorTable(1, slot(fsrCur_ == 0 ? 7 : 13)); // current frame, frame before, block vectors
+    list_->SetComputeRootDescriptorTable(1, slot(fsrCur_ == 0 ? 7 : 14)); // current frame, frame before, block vectors
     list_->SetComputeRootDescriptorTable(2, slot(10));
 
     barrier(fsrBlk_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1704,10 +1707,12 @@ void Host::RecordFsrTemporal()
 
     barrier(fsrMv_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     barrier(fsrDepth_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    barrier(fsrReact_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     list_->SetPipelineState(fsrPixelPso_.Get());
     list_->Dispatch((width_ + 7) / 8, (height_ + 7) / 8, 1);
     barrier(fsrMv_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
     barrier(fsrDepth_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+    barrier(fsrReact_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
 
     const auto now = std::chrono::steady_clock::now();
     float frameMs = static_cast<float>(std::chrono::duration<double, std::milli>(now - fsrLast_).count());
@@ -1725,6 +1730,7 @@ void Host::RecordFsrTemporal()
     d.color = ffxApiGetResourceDX12(curTex, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.depth = ffxApiGetResourceDX12(fsrDepth_.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.motionVectors = ffxApiGetResourceDX12(fsrMv_.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    d.reactive = ffxApiGetResourceDX12(fsrReact_.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ); // where the motion cannot be trusted
     d.output = ffxApiGetResourceDX12(fsrOut_.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     d.jitterOffset = { 0.0f, 0.0f };
     d.motionVectorScale = { 1.0f, -1.0f }; // sub-pixel vectors with inverted Y for DX12 / OptiScaler FG

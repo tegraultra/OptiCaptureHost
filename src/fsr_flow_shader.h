@@ -14,6 +14,7 @@ Texture2D<float2> gBlk : register(t2);
 RWTexture2D<float2> uBlk : register(u0);
 RWTexture2D<float2> uMv : register(u1);
 RWTexture2D<float> uDepth : register(u2);
+RWTexture2D<float> uReact : register(u3);
 cbuffer C : register(b0) { uint gW; uint gH; uint gBW; uint gBH; };
 
 float LumaCur(int2 p)
@@ -154,5 +155,9 @@ void CSPixel(uint3 id : SV_DispatchThreadID)
     }
     uMv[id.xy] = best; // sub-pixel, not rounded
     uDepth[id.xy] = 0.5; // the capture has no depth: flat, as before
+    // Where even the best vector leaves the 3x3 surroundings unlike the frame before (uncovered background, effects, a wrong
+    // estimate) the upscaler is told to lean on this frame instead of smearing its history (less ghosting and shimmer in a fast turn).
+    const float sad = max(bestCost - 0.015 * length(best), 0.0);
+    uReact[id.xy] = 0.8 * saturate((sad / 9.0 - 0.04) / 0.15);
 }
 )HLSL";
