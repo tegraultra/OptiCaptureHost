@@ -2720,17 +2720,21 @@ void App::OnClick(int id)
     }
     else if (id == kIdReset)
     {
-        const oc::Settings d;
-        st_.stop = d.stop;
-        st_.launcher = d.launcher;
-        st_.menuKey = d.menuKey;
-        st_.fpsKey = d.fpsKey;
-        st_.fpsCycleKey = d.fpsCycleKey;
-        st_.fgKey = d.fgKey;
-        Save();
-        WriteOptiScalerKeys(st_);
-        if (RegisterShowHotkey())
-            SetNote(L"Shortcuts reset.", Note::Ok);
+        if (Running())
+        {
+            SetNote(L"Stop the host first, then reset.", Note::Error);
+        }
+        else if (MessageBoxW(hwnd_, L"Reset ALL settings to their defaults?\n(frame generation, limiter, output scaling, present mode, shortcuts...)",
+                             L"Reset to default", MB_YESNO | MB_ICONQUESTION) == IDYES)
+        {
+            st_ = oc::Settings();
+            Save();
+            WriteOptiScalerKeys(st_);
+            RegisterShowHotkey();
+            OnClick(kIdFrameGenApply);
+            ReadPictureState();
+            SetNote(L"All settings reset to default.", Note::Ok);
+        }
     }
     else if (id == kIdLink)
     {
@@ -3987,8 +3991,8 @@ void App::Paint(HDC dc, int W, int H)
         Card(g, c);
         Text(g, L"Shortcuts", *f_.h2, R(560, 576, 200, 24), col::Text());
 
-        const gp::RectF reset = R(822, 576, 70, 24);
-        Text(g, L"Reset", hover_ == kIdReset ? *f_.link : *f_.linkN, reset, hover_ == kIdReset ? col::Accent2() : col::Muted(), 2);
+        const gp::RectF reset = R(812, 576, 80, 24);
+        Text(g, L"Reset all", hover_ == kIdReset ? *f_.link : *f_.linkN, reset, hover_ == kIdReset ? col::Accent2() : col::Muted(), 2);
         AddHit(reset, kIdReset);
 
         // brings back the warnings that were hidden with "Don't show this warning again"
