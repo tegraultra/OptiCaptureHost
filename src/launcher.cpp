@@ -2933,7 +2933,9 @@ void App::OnClick(int id)
                 SetNote(L"Could not update OptiScaler.ini. Check the file and permissions.", Note::Error);
             }
         }
-        // the ini was just replaced: put the multi frame generation count and the picture upscaler back in
+        // the ini was just replaced: the chosen upscaler, the multi frame generation count and the picture upscaler go back in
+        if (st_.frameGenMode >= 0 && st_.frameGenMode <= 10 && st_.frameGenMode != 3)
+            OnClick(kIdUpscalerApply);
         ApplyMfgCount();
         if (st_.upscale != 0)
             WritePictureIni(true);
