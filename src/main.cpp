@@ -1724,7 +1724,7 @@ void Host::RecordFsrTemporal()
     d.motionVectors = ffxApiGetResourceDX12(fsrMv_.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.output = ffxApiGetResourceDX12(fsrOut_.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     d.jitterOffset = { 0.0f, 0.0f };
-    d.motionVectorScale = { 1.0f, 1.0f }; // vectors in the captured picture's pixels
+    d.motionVectorScale = { 1.0f, -1.0f }; // vectors in the captured picture's pixels
     d.renderSize = { width_, height_ };
     d.upscaleSize = { outW_, outH_ };
     d.enableSharpening = st_.nisSharp > 0;

@@ -3151,8 +3151,8 @@ void App::OnClick(int id)
         }
         static const wchar_t* lvName[] = { L"Quality  (1.5x", L"Balanced  (1.7x", L"Performance  (2x" };
         static const double lvF[] = { 1.5, 1.7, 2.0 };
-        static const int methods[] = { 2, 3, 1, 4 }; // FSR 1, NIS, bilinear, FSR temporal (needs amd_fidelityfx_dx12.dll)
-        static const wchar_t* mName[] = { L"FSR 1", L"NIS", L"Bilinear", L"FSR temporal" };
+        static const int methods[] = { 2, 3, 1, 4 }; // FSR 1, NIS, bilinear, FSR3/4 (needs amd_fidelityfx_dx12.dll)
+        static const wchar_t* mName[] = { L"FSR 1", L"NIS", L"Bilinear", L"FSR3/4" };
         HMENU menu = CreatePopupMenu();
         if (menu)
         {
@@ -3874,7 +3874,7 @@ void App::Paint(HDC dc, int W, int H)
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
         std::wstring t = L"Off";
         if (st_.upscale != 0)
-            t = std::wstring(st_.upscale == 2 ? L"FSR 1  \u00B7  " : (st_.upscale == 3 ? L"NIS  \u00B7  " : (st_.upscale == 4 ? L"FSR temporal  \u00B7  " : L"Bilinear  \u00B7  "))) +
+            t = std::wstring(st_.upscale == 2 ? L"FSR 1  \u00B7  " : (st_.upscale == 3 ? L"NIS  \u00B7  " : (st_.upscale == 4 ? L"FSR3/4  \u00B7  " : L"Bilinear  \u00B7  "))) +
                 lvN[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 2) ? st_.upscaleLevel : 1];
         Text(g, t, *f_.chip, R(186, 740, 212, 22), col::Text());
         AddHit(selector, kIdUpSelect);
