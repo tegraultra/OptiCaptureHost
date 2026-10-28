@@ -153,7 +153,7 @@ void CSPixel(uint3 id : SV_DispatchThreadID)
     }
 
     // Output sub-pixel motion vector (NO round()!)
-    uMv[id.xy] = best;
+    uMv[id.xy] = round(best);
 
     // Dynamic Pseudo-Depth:
     // Static elements (HUD/crosshair, speed ~ 0) get closer depth (0.05) so FG never smears background over them.
