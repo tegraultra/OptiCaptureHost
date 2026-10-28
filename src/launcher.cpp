@@ -104,7 +104,7 @@ const wchar_t* const kFgNames[11] = {
     L"Artur MFG (old/new GPU)",          // 1
     L"NO FG",                            // 2
     L"Intel MFG (xell/new GPU)",         // 3 (old "FSR Frame Generation" entry, removed: shown as 0)
-    L"INTEL FG",                         // 4 (folder "intel FG")
+    L"Intel FG (xell/new GPU)",            // 4 (folder "intel FG")
     L"Combo MFG (old/new GPU)",          // 5
     L"Nukem FG (old/new GPU)",           // 6
     L"FSR3-4 FG (old/new GPU)",          // 7

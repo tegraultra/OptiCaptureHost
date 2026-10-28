@@ -54,6 +54,7 @@
 #include <mutex>
 #include <cmath>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "settings.h"
@@ -2798,7 +2799,15 @@ int Host::Run(const Options& opt, const oc::Settings& settings)
     }
 
     Log("Shutting down");
+    // With some frame generation libraries (Nukem FG, FSR3-4 FG) closing takes long or ends in a crash while their DLLs unload.
+    // A watchdog ends the process with code 0 if the clean-up does not finish in time, so the launcher does not report an error.
+    std::thread([] {
+        Sleep(2500);
+        Log("Shutdown took too long: ending the process");
+        TerminateProcess(GetCurrentProcess(), 0);
+    }).detach();
     Shutdown();
+    Log("Shutdown done");
     return 0;
 }
 
@@ -2834,8 +2843,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             return 2;
         }
 
-        Host host;
-        return host.Run(opt, settings);
+        int rc = 0;
+        {
+            Host host;
+            rc = host.Run(opt, settings);
+        }
+        // Leave without running the DLL detach code of OptiScaler and the frame generation libraries inside this process:
+        // some of them (Nukem FG, FSR3-4 FG) hang or crash there, which showed up as a red error in the launcher.
+        Log("Exit %d", rc);
+        TerminateProcess(GetCurrentProcess(), static_cast<UINT>(rc));
+        return rc;
     }
     catch (const winrt::hresult_error& e)
     {
