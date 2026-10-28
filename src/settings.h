@@ -35,8 +35,8 @@ struct Settings
     UINT fpsCycleKey = VK_NEXT;  // FPS overlay type (FpsCycleShortcutKey)
     UINT fgKey = VK_END;         // frame generation on/off (FGShortcutKey)
     int presentMode = 3;      // 0 auto (FG on: no wait, FG off: VSync), 1 always interval 0, 2 always interval 1, 3 classic 2.2.0 behaviour, 4 Lossless-style (tearing, latency 1), 5 classic + exactly refresh/2 base frames, 6 classic + unlimited capture (no half-refresh limit)
-    int upscale = 0;          // output scaling: 0 off, 1 bilinear, 2 FSR1 (EASU+RCAS), 3 NIS, 4 FSR3/4 (motion measured from the frames + AMD runtime); read at start
-    int upscaleLevel = 1;     // input size: 0 Quality 67%, 1 Balanced 58%, 2 Performance 50%, 3 Native 100% (FSR3/4 only: anti-aliasing, no resize)
+    int upscale = 4;          // output scaling: 0 off, 1 bilinear, 2 FSR1 (EASU+RCAS), 3 NIS, 4 FSR3/4 (motion measured from the frames + AMD runtime); read at start
+    int upscaleLevel = 0;     // input size: 0 Quality 67%, 1 Balanced 58%, 2 Performance 50%, 3 Native 100% (FSR3/4 only: anti-aliasing, no resize)
     int labelSeconds = 8;     // output scaling: show "720 to 1080" in the corner for this many seconds (0 never, 999 always)
     int nisSharp = 50;        // NIS sharpness x100 (0..100)
     int upscaleSharp = 25;    // FSR1 RCAS sharpness x100 (0 = sharpest, 200 = none), default 0.25
@@ -112,10 +112,10 @@ inline void LoadSettings(Settings& s)
 
     s.presentMode = GetPrivateProfileIntW(L"Advanced", L"PresentMode", 3, path.c_str());
     if (s.presentMode < 0 || s.presentMode > 6) s.presentMode = 3;
-    s.upscale = GetPrivateProfileIntW(L"Upscale", L"Method", 0, path.c_str());
-    if (s.upscale < 0 || s.upscale > 4) s.upscale = 0;
-    s.upscaleLevel = GetPrivateProfileIntW(L"Upscale", L"Level", 1, path.c_str());
-    if (s.upscaleLevel < 0 || s.upscaleLevel > 3) s.upscaleLevel = 1;
+    s.upscale = GetPrivateProfileIntW(L"Upscale", L"Method", 4, path.c_str());
+    if (s.upscale < 0 || s.upscale > 4) s.upscale = 4;
+    s.upscaleLevel = GetPrivateProfileIntW(L"Upscale", L"Level", 0, path.c_str());
+    if (s.upscaleLevel < 0 || s.upscaleLevel > 3) s.upscaleLevel = 0;
     s.nisSharp = GetPrivateProfileIntW(L"Upscale", L"NisSharpness", 50, path.c_str());
     if (s.nisSharp < 0 || s.nisSharp > 100) s.nisSharp = 50;
     s.labelSeconds = GetPrivateProfileIntW(L"Upscale", L"LabelSeconds", 8, path.c_str());

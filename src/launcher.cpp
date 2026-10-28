@@ -3235,29 +3235,30 @@ void App::OnClick(int id)
         }
         static const wchar_t* lvName[] = { L"Quality  (1.5x", L"Balanced  (1.7x", L"Performance  (2x", L"Native  (1x" };
         static const double lvF[] = { 1.5, 1.7, 2.0, 1.0 };
-        static const int methods[] = { 2, 3, 1, 4 }; // FSR 1, NIS, bilinear, FSR temporal (needs amd_fidelityfx_dx12.dll)
-        static const wchar_t* mName[] = { L"FSR 1", L"NIS", L"Bilinear", L"FSR3/4" };
+        static const wchar_t* mName[] = { L"", L"Bilinear", L"FSR 1", L"NIS", L"FSR3/4" };   // by method number
+        // order: FSR3/4 Native first, then FSR3/4 Quality / Balanced / Performance, then FSR 1, NIS and bilinear, Off last
+        struct Entry { int method; int level; };
+        static const Entry entries[] = {
+            { 4, 3 }, { 4, 0 }, { 4, 1 }, { 4, 2 },
+            { 2, 0 }, { 2, 1 }, { 2, 2 }, { 3, 0 }, { 3, 1 }, { 3, 2 }, { 1, 0 }, { 1, 1 }, { 1, 2 } };
+        constexpr int kEntries = static_cast<int>(sizeof(entries) / sizeof(entries[0]));
         HMENU menu = CreatePopupMenu();
         if (menu)
         {
-            AppendMenuW(menu, MF_STRING | (st_.upscale == 0 ? MF_CHECKED : 0), kUpMenuBase, L"Off");
-            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            for (int m = 0; m < 4; ++m)
-                for (int l = 0; l < 3; ++l)
-                {
-                    const int cw = (static_cast<int>(mw / lvF[l] + 0.5)) & ~1;
-                    const int ch = (static_cast<int>(mh / lvF[l] + 0.5)) & ~1;
-                    std::wstring t = std::wstring(mName[m]) + L"  \u00B7  " + lvName[l] + L", " + std::to_wstring(cw) + L"x" +
-                                     std::to_wstring(ch) + L" \u2192 " + std::to_wstring(mw) + L"x" + std::to_wstring(mh) + L")";
-                    AppendMenuW(menu, MF_STRING | ((st_.upscale == methods[m] && st_.upscaleLevel == l) ? MF_CHECKED : 0),
-                                kUpMenuBase + 1 + m * 3 + l, t.c_str());
-                }
+            for (int i = 0; i < kEntries; ++i)
             {
-                // FSR3/4 Native: the game keeps its size, FSR only smooths the picture (anti-aliasing)
-                const std::wstring t = std::wstring(L"FSR3/4  \u00B7  Native  (1x), ") + std::to_wstring(mw) + L"x" + std::to_wstring(mh) +
-                                       L" \u2192 " + std::to_wstring(mw) + L"x" + std::to_wstring(mh) + L")";
-                AppendMenuW(menu, MF_STRING | ((st_.upscale == 4 && st_.upscaleLevel == 3) ? MF_CHECKED : 0), kUpMenuBase + 13, t.c_str());
+                if (i == 4)
+                    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                const Entry& e = entries[i];
+                const int cw = (static_cast<int>(mw / lvF[e.level] + 0.5)) & ~1;
+                const int ch = (static_cast<int>(mh / lvF[e.level] + 0.5)) & ~1;
+                std::wstring t = std::wstring(mName[e.method]) + L"  \u00B7  " + lvName[e.level] + L", " + std::to_wstring(cw) + L"x" +
+                                 std::to_wstring(ch) + L" \u2192 " + std::to_wstring(mw) + L"x" + std::to_wstring(mh) + L")";
+                AppendMenuW(menu, MF_STRING | ((st_.upscale == e.method && st_.upscaleLevel == e.level) ? MF_CHECKED : 0),
+                            kUpMenuBase + 1 + i, t.c_str());
             }
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(menu, MF_STRING | (st_.upscale == 0 ? MF_CHECKED : 0), kUpMenuBase, L"Off");
             POINT pt{};
             GetCursorPos(&pt);
             const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
@@ -3268,15 +3269,16 @@ void App::OnClick(int id)
                 Save();
                 SetNote(L"Output scaling is off.", Note::Ok);
             }
-            else if (cmd > static_cast<UINT>(kUpMenuBase) && cmd <= static_cast<UINT>(kUpMenuBase + 13))
+            else if (cmd > static_cast<UINT>(kUpMenuBase) && cmd <= static_cast<UINT>(kUpMenuBase + kEntries))
             {
-                const int k = static_cast<int>(cmd) - kUpMenuBase - 1;
-                st_.upscale = k == 12 ? 4 : methods[k / 3];
-                st_.upscaleLevel = k == 12 ? 3 : k % 3;
+                const Entry& e = entries[static_cast<int>(cmd) - kUpMenuBase - 1];
+                st_.upscale = e.method;
+                st_.upscaleLevel = e.level;
                 Save();
                 OnClick(kIdPictureOn); // the upscaler on the picture goes on with it
                 ReadPictureState();
-                SetNote(L"START makes the game window that small and scales it up. \"Run the upscaler on the picture\" was turned on too.",
+                SetNote(e.level == 3 ? L"Native: the game keeps its size and FSR only smooths the picture. \"Run the upscaler on the picture\" was turned on too."
+                                     : L"START makes the game window that small and scales it up. \"Run the upscaler on the picture\" was turned on too.",
                         Note::Info);
             }
         }
