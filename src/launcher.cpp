@@ -48,6 +48,7 @@ constexpr const wchar_t* kTelegramUrl = L"https://t.me/MKJH_APPS";
 constexpr const wchar_t* kTelegramJHUrl = L"https://t.me/PersianPatchDeveloper";
 constexpr const wchar_t* kTelegramAppsUrl = L"https://t.me/MKJH_APPS";
 constexpr const wchar_t* kTelegramArchiveUrl = L"https://t.me/MKJH_ARCHIVE";
+constexpr const wchar_t* kDonateUrl = L"https://daramet.com/MK_JH";
 constexpr const wchar_t* kTelegramText = L"t.me/MKJH_APPS";
 constexpr const wchar_t* kHostExe = L"OptiCaptureHost.exe";
 constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host's overlay window class
@@ -68,6 +69,7 @@ constexpr int kIdUpscalerApply = 12;
 constexpr int kIdLinkJH = 8;
 constexpr int kIdLinkApps = 9;
 constexpr int kIdLinkArchive = 10;
+constexpr int kIdLinkDonate = 44;
 constexpr int kFgMenuBase = 5000;
 constexpr int kUpscalerMenuBase = 5100;
 constexpr int kIdBoostSelect = 13;
@@ -95,7 +97,23 @@ constexpr int kIdUpResize = 32;
 constexpr int kIdUpSlider = 33;
 constexpr int kIdProfSlot0 = 34; // 34..37: profile slots 1..4
 constexpr int kIdProfileLoad = 38;
+constexpr int kIdPreset0 = 40; // 40..43: quick modes NO FG / x2 / x3 / x4
 constexpr int kUpMenuBase = 5900;
+const wchar_t* const kFgNames[11] = {
+    L"Intel MFG (xell/new GPU)",         // 0
+    L"Artur MFG (old/new GPU)",          // 1
+    L"NO FG",                            // 2
+    L"Intel MFG (xell/new GPU)",         // 3 (old "FSR Frame Generation" entry, removed: shown as 0)
+    L"INTEL FG",                         // 4 (folder "intel FG")
+    L"Combo MFG (old/new GPU)",          // 5
+    L"Nukem FG (old/new GPU)",           // 6
+    L"FSR3-4 FG (old/new GPU)",          // 7
+    L"Nvidia MFG (RTX Only)",            // 8
+    L"FSR FG (AntiLag2/rdna2.3.4)",      // 9  folder "FSR FG AL2"
+    L"FSR FG (latency flex/old/new GPU)" // 10 folder "FSR FG LF"
+};
+// menu order -> mode
+const int kFgMenuOrder[10] = { 0, 1, 5, 9, 10, 6, 7, 8, 4, 2 };
 const wchar_t* const kProfilesDir = L"Game Profiles"; // next to the launcher: one folder per game
 constexpr int kLimitModeMenuBase = 5800;
 constexpr int kLimitTargetMenuBase = 5500;
@@ -217,6 +235,19 @@ void DrawPlane(gp::Graphics& g, const gp::RectF& r)
 
     gp::Pen fold(gp::Color(255, 60, 120, 200), max(1.0f, r.Width * 0.05f));
     g.DrawLine(&fold, P(0.47f, 0.60f), P(0.80f, 0.24f));
+}
+
+// A small heart in a round badge (the donate link).
+void DrawHeart(gp::Graphics& g, const gp::RectF& r)
+{
+    GradRound(g, r, r.Width / 2.0f, gp::Color(255, 255, 94, 130), gp::Color(255, 255, 160, 90));
+    auto P = [&](float x, float y) { return gp::PointF(r.X + r.Width * x, r.Y + r.Height * y); };
+    gp::SolidBrush w(col::White());
+    const float rr = r.Width * 0.17f;
+    g.FillEllipse(&w, P(0.31f, 0.30f).X, P(0.31f, 0.30f).Y, rr * 2, rr * 2);
+    g.FillEllipse(&w, P(0.52f, 0.30f).X, P(0.52f, 0.30f).Y, rr * 2, rr * 2);
+    gp::PointF tri[3] = { P(0.285f, 0.50f), P(0.755f, 0.50f), P(0.50f, 0.78f) };
+    g.FillPolygon(&w, tri, 3);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1096,6 +1127,48 @@ LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& g
     return out;
 }
 
+// After the capture: put the limiter's profile back to the values it had before Apply (not just limit 0).
+// 0 done (or nothing to do), 1 RTSS did not take it (needs administrator rights), 2 RTSS not installed.
+int DoLimitRestore(RtssApi& api)
+{
+    const std::wstring ini = oc::SettingsPath();
+    if (GetPrivateProfileIntW(L"Rtss", L"Has", 0, ini.c_str()) == 0)
+        return 0;
+    const std::wstring dir = RtssInstallDir();
+    if (dir.empty() || !api.Open(dir))
+        return 2;
+    wchar_t prof[260] = {};
+    GetPrivateProfileStringW(L"Rtss", L"Profile", L"", prof, 260, ini.c_str());
+    const int oLimit = GetPrivateProfileIntW(L"Rtss", L"OrigLimit", 0, ini.c_str());
+    const int oDen = GetPrivateProfileIntW(L"Rtss", L"OrigDen", 1, ini.c_str());
+    const int oSync = GetPrivateProfileIntW(L"Rtss", L"OrigSync", 0, ini.c_str());
+    RtssLog(L"capture ended: putting the limiter profile \"" + std::wstring(prof) + L"\" back");
+    if (!api.Write(Narrow(prof), oLimit, oDen < 1 ? 1 : oDen, oSync))
+        return 1;
+    WritePrivateProfileStringW(L"Rtss", L"Has", L"0", ini.c_str());
+    return 0;
+}
+
+int RunLimitRestoreElevated()
+{
+    wchar_t self[MAX_PATH * 2] = {};
+    GetModuleFileNameW(nullptr, self, MAX_PATH * 2);
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";
+    sei.lpFile = self;
+    sei.lpParameters = L"--rtss-restore";
+    sei.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&sei) || !sei.hProcess)
+        return 1;
+    WaitForSingleObject(sei.hProcess, 30000);
+    DWORD code = 1;
+    GetExitCodeProcess(sei.hProcess, &code);
+    CloseHandle(sei.hProcess);
+    return static_cast<int>(code);
+}
+
 // RTSS on-screen display of the game's profile: off while the host runs (the host's overlay and RTSS's would sit on top of
 // each other), put back to what it was afterwards. 0 done, 1 RTSS did not take it (needs administrator rights), 2 not installed.
 int DoOsd(RtssApi& api, const std::wstring& exe, bool hide)
@@ -1389,6 +1462,29 @@ class App
     void ResizeGameWindow(bool quiet = false);
     std::wstring osdExe_; // game whose RTSS overlay was turned off for this capture
     void SetRtssOsd(bool hide);
+    void RestoreLimiter();
+    // Quick modes: 0 NO FG, 1 x2, 2 x3, 3 x4: limiter on the refresh rate (or 1/2, 1/3, 1/4 of it, applied at START), Classic + unlimited, and
+    // NO FG or Intel MFG.
+    static int PresetFg(int k) { return k == 0 ? 2 : 0; }
+    static int PresetLimit(int k) { return k == 0 ? 0 : -(k + 1); }
+    bool PresetActive(int k) const
+    {
+        return st_.frameGenMode == PresetFg(k) && st_.limitFps == PresetLimit(k) && st_.limitAuto == 1 && st_.limitTarget != 0 &&
+               st_.presentMode == 6;
+    }
+    void ApplyPreset(int k)
+    {
+        st_.frameGenMode = PresetFg(k);
+        st_.limitFps = PresetLimit(k);
+        st_.limitAuto = 1;
+        if (st_.limitTarget == 0)
+            st_.limitTarget = 1; // the game's own profile
+        st_.presentMode = 6;
+        Save();
+        static const wchar_t* const names[] = { L"NO FG MOD", L"x2 FG MOD", L"x3 FG MOD", L"x4 FG MOD" };
+        SetNote(std::wstring(names[k]) + L": limiter, present mode and frame generation set.", Note::Ok);
+        OnClick(kIdFrameGenApply); // writes OptiScaler.ini for the chosen frame generation
+    }
     gp::RectF upSliderRect_{};
     bool upSliding_ = false;
     ULONGLONG upSliderSaved_ = 0;
@@ -1884,6 +1980,7 @@ void App::PollHost()
         stopping_ = false;
 
         SetRtssOsd(false);
+        RestoreLimiter();
         if (upWnd_)
         {
             if (IsWindow(upWnd_))
@@ -2073,6 +2170,18 @@ void App::ToggleBorderless()
     border_.push_back(b);
     SetNote(L"Borderless is on. Press the button again to bring the frame back.", Note::Ok);
     Refresh();
+}
+
+// The capture is over: the limiter goes back to what the game's RTSS profile had before.
+void App::RestoreLimiter()
+{
+    if (GetPrivateProfileIntW(L"Rtss", L"Has", 0, oc::SettingsPath().c_str()) == 0)
+        return;
+    int r = DoLimitRestore(rtss_);
+    if (r == 1 && !IsElevated())
+        r = RunLimitRestoreElevated();
+    if (r == 0)
+        limitInfo_ = L"Limiter put back after the capture.";
 }
 
 void App::SetRtssOsd(bool hide)
@@ -2349,9 +2458,7 @@ void App::PaintLive(gp::Graphics& g, const gp::RectF& view)
         y += rowH;
     };
 
-    static const wchar_t* fgShort[] = { L"Intel Multi Frame Generation", L"Arthur Multi Frame Generation", L"No Frame Generation",
-                                        L"FSR Frame Generation", L"Intel Frame Generation",
-                                        L"Combo MFG", L"Nukem FG", L"FSR3-4 FG", L"Nvidia MFG" };
+
     static const wchar_t* vsShort[] = { L"Auto", L"On · 0", L"On · 1", L"Off" };
     static const wchar_t* focusNames[] = { L"Game", L"Overlay", L"Other window" };
 
@@ -2369,7 +2476,7 @@ void App::PaintLive(gp::Graphics& g, const gp::RectF& view)
         liveValid_ ? std::to_wstring(live_.interval) + L"   · VSync " + vsShort[vsyncMode_ < 0 ? 0 : (vsyncMode_ == 2 ? 1 : (vsyncMode_ == 1 ? 2 : 3))] : dash,
         col::Text());
     row(L"Focus", liveValid_ ? focusNames[(live_.focus >= 0 && live_.focus <= 2) ? live_.focus : 2] : dash, col::Text());
-    row(L"Frame generation", fgShort[(st_.frameGenMode >= 0 && st_.frameGenMode <= 8) ? st_.frameGenMode : 0], col::Text());
+    row(L"Frame generation", kFgNames[(st_.frameGenMode >= 0 && st_.frameGenMode <= 10) ? st_.frameGenMode : 0], col::Text());
 
     if (capActive_ || blockActive_)
     {
@@ -2625,6 +2732,10 @@ void App::OnClick(int id)
     {
         ShellExecuteW(hwnd_, L"open", kTelegramAppsUrl, nullptr, nullptr, SW_SHOWNORMAL);
     }
+    else if (id == kIdLinkDonate)
+    {
+        ShellExecuteW(hwnd_, L"open", kDonateUrl, nullptr, nullptr, SW_SHOWNORMAL);
+    }
     else if (id == kIdLinkArchive)
     {
         ShellExecuteW(hwnd_, L"open", kTelegramArchiveUrl, nullptr, nullptr, SW_SHOWNORMAL);
@@ -2634,15 +2745,9 @@ void App::OnClick(int id)
         HMENU menu = CreatePopupMenu();
         if (menu)
         {
-            AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 0 ? MF_CHECKED : 0), kFgMenuBase + 0, L"Intel Multi Frame Generation");
-            AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 1 ? MF_CHECKED : 0), kFgMenuBase + 1, L"Arthur Multi Frame Generation");
-            AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 2 ? MF_CHECKED : 0), kFgMenuBase + 2, L"No Frame Generation");
-            AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 3 ? MF_CHECKED : 0), kFgMenuBase + 3, L"FSR Frame Generation");
-            AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 4 ? MF_CHECKED : 0), kFgMenuBase + 4, L"Intel Frame Generation");
-            AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 5 ? MF_CHECKED : 0), kFgMenuBase + 5, L"Combo MFG");
-            AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 6 ? MF_CHECKED : 0), kFgMenuBase + 6, L"Nukem FG");
-            AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 7 ? MF_CHECKED : 0), kFgMenuBase + 7, L"FSR3-4 FG");
-            AppendMenuW(menu, MF_STRING | (st_.frameGenMode == 8 ? MF_CHECKED : 0), kFgMenuBase + 8, L"Nvidia MFG");
+            for (int k = 0; k < 10; ++k)
+                AppendMenuW(menu, MF_STRING | (st_.frameGenMode == kFgMenuOrder[k] ? MF_CHECKED : 0), kFgMenuBase + kFgMenuOrder[k],
+                            kFgNames[kFgMenuOrder[k]]);
 
             POINT pt{};
             GetCursorPos(&pt);
@@ -2651,29 +2756,19 @@ void App::OnClick(int id)
                 pt.x, pt.y, 0, hwnd_, nullptr);
             DestroyMenu(menu);
 
-            if (cmd >= kFgMenuBase && cmd <= kFgMenuBase + 8)
+            if (cmd >= kFgMenuBase && cmd <= kFgMenuBase + 10)
             {
                 st_.frameGenMode = static_cast<int>(cmd - kFgMenuBase);
                 Save();
 
-                static const wchar_t* names[] = {
-                    L"Intel Multi Frame Generation",
-                    L"Arthur Multi Frame Generation",
-                    L"No Frame Generation",
-                    L"FSR Frame Generation",
-                    L"Intel Frame Generation",
-                    L"Combo MFG",
-                    L"Nukem FG",
-                    L"FSR3-4 FG",
-                    L"Nvidia MFG"
-                };
-                SetNote(std::wstring(L"Selected: ") + names[st_.frameGenMode] + L". Press Apply to write OptiScaler.ini.", Note::Ok);
+
+                SetNote(std::wstring(L"Selected: ") + kFgNames[st_.frameGenMode] + L". Press Apply to write OptiScaler.ini.", Note::Ok);
             }
         }
     }
     else if (id == kIdFrameGenApply)
     {
-        if (st_.frameGenMode < 0 || st_.frameGenMode > 8)
+        if (st_.frameGenMode < 0 || st_.frameGenMode > 10 || st_.frameGenMode == 3)
         {
             SetNote(L"Invalid Frame Generation selection.", Note::Error);
         }
@@ -2681,8 +2776,8 @@ void App::OnClick(int id)
         {
             // Combo MFG ("Combo"), Nukem FG ("Nukem FG"), FSR3-4 FG ("FSR3-4 FG"), Nvidia MFG ("DlssG"): everything inside
             // that folder: only its OptiScaler.ini is copied next to the program, replacing the one there.
-            static const wchar_t* const shown[] = { L"Combo", L"Nukem FG", L"FSR3-4 FG", L"DlssG" };
-            static const wchar_t* const labels[] = { L"Combo MFG", L"Nukem FG", L"FSR3-4 FG", L"Nvidia MFG" };
+            static const wchar_t* const shown[] = { L"Combo", L"Nukem FG", L"FSR3-4 FG", L"DlssG", L"FSR FG AL2", L"FSR FG LF" };
+            static const wchar_t* const labels[] = { L"Combo MFG", L"Nukem FG", L"FSR3-4 FG", L"Nvidia MFG", L"FSR FG (AntiLag2)", L"FSR FG (latency flex)" };
             const int k = st_.frameGenMode - 5;
             const std::wstring base = shown[k];
             std::vector<std::wstring> folders = { base };
@@ -2923,6 +3018,13 @@ void App::OnClick(int id)
         if (selected_ >= 0 && selected_ < static_cast<int>(games_.size()))
             RememberSlot(games_[selected_].exe, profileSlot_);
         SetNote(L"Profile " + std::to_wstring(profileSlot_) + L" selected. Save stores the current settings in it, Load applies it.", Note::Info);
+    }
+    else if (id >= kIdPreset0 && id < kIdPreset0 + 4)
+    {
+        if (Running())
+            SetNote(L"Stop the capture first, then pick a mode.", Note::Info);
+        else
+            ApplyPreset(id - kIdPreset0);
     }
     else if (id == kIdProfileLoad)
     {
@@ -3390,6 +3492,7 @@ LRESULT App::OnMessage(UINT m, WPARAM w, LPARAM l)
     case WM_CLOSE:
         Stop(true);
         SetRtssOsd(false);
+        RestoreLimiter();
         DestroyWindow(hwnd_);
         return 0;
 
@@ -3516,6 +3619,23 @@ void App::Paint(HDC dc, int W, int H)
         g.FillEllipse(&dot, pill.X + S(14), pill.Y + S(10), S(10), S(10));
         Text(g, stopping_ ? L"Stopping" : (running ? L"Capturing" : L"Ready"), *f_.bodyB,
              gp::RectF(pill.X + S(32), pill.Y, S(110), pill.Height), tone);
+    }
+
+    // ---- quick modes ----
+    {
+        static const wchar_t* const names[] = { L"NO FG MOD", L"x2 FG MOD", L"x3 FG MOD", L"x4 FG MOD" };
+        Text(g, L"Quick modes", *f_.sm, R(24, 76, 100, 20), col::Muted());
+        for (int k = 0; k < 4; ++k)
+        {
+            const gp::RectF chip = R(124.0f + k * 196.0f, 72, 188, 26);
+            const bool active = PresetActive(k);
+            const bool hot = hover_ == kIdPreset0 + k && !locked;
+            FillRound(g, chip, S(8), active ? col::Alpha(col::Accent(), 70) : (hot ? col::RowHot() : col::Row()));
+            StrokeRound(g, chip, S(8), active ? col::Accent() : (hot ? col::Accent2() : col::Line()), max(1.0f, S(active ? 2 : 1)));
+            Text(g, names[k], *f_.chip, chip, locked ? col::Muted() : col::Text(), 1);
+            if (!locked)
+                AddHit(chip, kIdPreset0 + k);
+        }
     }
 
     // ---- games card ----
@@ -3867,17 +3987,7 @@ void App::Paint(HDC dc, int W, int H)
 
         // ---- Frame Generation controls ----
         {
-            static const wchar_t* fgNames[] = {
-                L"Intel Multi Frame Generation",
-                L"Arthur Multi Frame Generation",
-                L"No Frame Generation",
-                L"FSR Frame Generation",
-                L"Intel Frame Generation",
-                L"Combo MFG",
-                L"Nukem FG",
-                L"FSR3-4 FG",
-                L"Nvidia MFG"
-            };
+
 
             Text(g, L"Frame Generation", *f_.bodyB,
                 R(560, 386, 230, 24), col::Text());
@@ -3887,7 +3997,7 @@ void App::Paint(HDC dc, int W, int H)
             FillRound(g, selector, S(8), selectorHot ? col::RowHot() : col::Row());
             StrokeRound(g, selector, S(8),
                 selectorHot ? col::Accent() : col::Line(), max(1.0f, S(1)));
-            Text(g, fgNames[(st_.frameGenMode >= 0 && st_.frameGenMode <= 8)
+            Text(g, kFgNames[(st_.frameGenMode >= 0 && st_.frameGenMode <= 10)
                 ? st_.frameGenMode : 0], *f_.chip,
                 R(568, 418, 214, 22), locked ? col::Muted() : col::Text());
             if (!locked)
@@ -3998,26 +4108,32 @@ void App::Paint(HDC dc, int W, int H)
         gp::Pen line(col::Line(), max(1.0f, S(1)));
         g.DrawLine(&line, S(24), S(822), S(912), S(822));
 
-        Text(g, L"by", *f_.body, R(24, 838, 24, 22), col::Muted());
-        Text(g, L"MK-JH", *f_.bodyB, R(44, 838, 120, 22), col::Accent());
-
-        // Three clickable Telegram links.
+        // Links panel: a framed card with four chips (icon, small label, value).
         {
-            const bool hotJH = hover_ == kIdLinkJH;
-            DrawPlane(g, R(24, 864, 22, 22));
-            Text(g, L"MK-JH", hotJH ? *f_.link : *f_.linkN,
-                R(54, 862, 150, 26), hotJH ? col::Accent2() : col::Accent());
-            AddHit(R(24, 862, 200, 26), kIdLinkJH);
-
-            const bool hotApps = hover_ == kIdLinkApps;
-            Text(g, L"MKJH_APPS", hotApps ? *f_.link : *f_.linkN,
-                R(145, 862, 135, 26), hotApps ? col::Accent2() : col::Accent());
-            AddHit(R(140, 862, 140, 26), kIdLinkApps);
-
-            const bool hotArchive = hover_ == kIdLinkArchive;
-            Text(g, L"MK-JH_ARCHIVE", hotArchive ? *f_.link : *f_.linkN,
-                R(290, 862, 180, 26), hotArchive ? col::Accent2() : col::Accent());
-            AddHit(R(285, 862, 190, 26), kIdLinkArchive);
+            const gp::RectF panel = R(24, 856, 626, 42);
+            Card(g, panel);
+            struct LinkChip { const wchar_t* label; const wchar_t* value; float x; float w; int id; bool heart; };
+            static const LinkChip chips[] = {
+                { L"Developer", L"MK-JH", 32, 128, kIdLinkJH, false },
+                { L"Telegram Channel", L"MK-JH_APPS", 168, 168, kIdLinkApps, false },
+                { L"Archive", L"MK-JH_ARCHIVE", 344, 168, kIdLinkArchive, false },
+                { L"Support me", L"Donate", 520, 122, kIdLinkDonate, true },
+            };
+            for (const LinkChip& c : chips)
+            {
+                const gp::RectF chip = R(c.x, 860, c.w, 34);
+                const bool hot = hover_ == c.id;
+                const gp::Color tone = c.heart ? gp::Color(255, 255, 110, 140) : col::Accent();
+                FillRound(g, chip, S(9), hot ? col::Alpha(tone, 46) : col::Row());
+                StrokeRound(g, chip, S(9), hot ? tone : col::Line(), max(1.0f, S(1)));
+                if (c.heart)
+                    DrawHeart(g, R(c.x + 8, 866, 22, 22));
+                else
+                    DrawPlane(g, R(c.x + 8, 866, 22, 22));
+                Text(g, c.label, *f_.tiny, R(c.x + 36, 862, c.w - 40, 14), col::Muted());
+                Text(g, c.value, hot ? *f_.link : *f_.linkN, R(c.x + 36, 874, c.w - 40, 18), hot ? (c.heart ? tone : col::Accent2()) : tone);
+                AddHit(chip, c.id);
+            }
         }
 
         // status line
@@ -4041,10 +4157,10 @@ void App::Paint(HDC dc, int W, int H)
         {
             status = L"Pick a game from the list to begin.";
         }
-        Text(g, status, *f_.sm, R(300, 836, 340, 50), tone, 0, true);
+        Text(g, status, *f_.sm, R(24, 828, 640, 28), tone, 0, true);
 
         const bool noPick = !running && (selected_ < 0 || selected_ >= static_cast<int>(games_.size()));
-        Button(g, R(672, 839, 220, 44), running ? (stopping_ ? L"STOPPING\u2026" : L"STOP") : L"START", noPick, running);
+        Button(g, R(672, 852, 240, 46), running ? (stopping_ ? L"STOPPING\u2026" : L"STOP") : L"START", noPick, running);
     }
 
     // ---- warning dialog (on top of everything) ----
@@ -4078,6 +4194,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
             if (!IsWindow(b.wnd))
                 return 1;
             return (on ? BorderApplyOn(b.wnd, b) : BorderApplyOff(b.wnd, b)) ? 0 : 1;
+        }
+        if (argv && argc >= 2 && wcscmp(argv[1], L"--rtss-restore") == 0)
+        {
+            LocalFree(argv);
+            RtssApi api;
+            return DoLimitRestore(api);
         }
         if (argv && argc >= 4 && wcscmp(argv[1], L"--rtss-osd") == 0)
         {
