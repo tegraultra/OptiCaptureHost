@@ -2728,10 +2728,14 @@ void App::OnClick(int id)
                              L"Reset to default", MB_YESNO | MB_ICONQUESTION) == IDYES)
         {
             st_ = oc::Settings();
+            st_.presentDelay = 0;  // reset values: no present delay,
+            st_.presentMode = 0;   // Auto present mode,
+            st_.upscalerMode = 1;  // AMD FSR 3.1.5
             Save();
             WriteOptiScalerKeys(st_);
             RegisterShowHotkey();
             OnClick(kIdFrameGenApply);
+            OnClick(kIdUpscalerApply);
             ReadPictureState();
             SetNote(L"All settings reset to default.", Note::Ok);
         }
