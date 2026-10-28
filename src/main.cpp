@@ -1736,8 +1736,8 @@ void Host::RecordFsrTemporal()
     d.motionVectorScale = { 1.0f, -1.0f }; // sub-pixel vectors with inverted Y for DX12 / OptiScaler FG
     d.renderSize = { width_, height_ };
     d.upscaleSize = { outW_, outH_ };
-    d.enableSharpening = st_.nisSharp > 0;
-    d.sharpness = std::clamp(static_cast<float>(st_.nisSharp) / 100.0f, 0.0f, 1.0f);
+    d.enableSharpening = false; // the sharpness slider is applied afterwards by our RCAS pass (RecordUpscale)
+    d.sharpness = 0.0f;
     d.frameTimeDelta = frameMs;
     d.preExposure = 1.0f;
     d.reset = !fsrHavePrev_;
@@ -1905,6 +1905,18 @@ void Host::RecordUpscale(ID3D12Resource* bb, UINT idx)
         list_->SetPipelineState(upPsoRcas_.Get());
         list_->SetGraphicsRoot32BitConstants(0, 16, r, 0);
         list_->SetGraphicsRootDescriptorTable(1, srv1);
+        list_->DrawInstanced(3, 1, 0, 0);
+    }
+    else if (fsrTemporal && st_.nisSharp > 0)
+    {
+        // FSR3/4's own sharpening is faint (and FSR 4 has none): the sharpness slider drives FSR 1's RCAS on FSR's picture instead.
+        // Slider 100 = sharpest (RCAS at its strongest), lower = softer; 0 = no extra sharpening.
+        UINT r[16] = {};
+        r[0] = FloatBits(std::exp2(-static_cast<float>(100 - std::clamp(st_.nisSharp, 0, 100)) / 100.0f));
+        list_->OMSetRenderTargets(1, &bbRtv, FALSE, nullptr);
+        list_->SetPipelineState(upPsoRcas_.Get());
+        list_->SetGraphicsRoot32BitConstants(0, 16, r, 0);
+        list_->SetGraphicsRootDescriptorTable(1, finalSrc);
         list_->DrawInstanced(3, 1, 0, 0);
     }
     else
