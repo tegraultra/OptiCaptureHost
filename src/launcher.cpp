@@ -70,6 +70,7 @@ constexpr int kIdLinkJH = 8;
 constexpr int kIdLinkApps = 9;
 constexpr int kIdLinkArchive = 10;
 constexpr int kIdLinkDonate = 50;
+constexpr int kIdOptiFps = 51; // OptiScaler FPS limit = monitor refresh rate
 constexpr int kIdMfg0 = 60; // 60..64: multi frame generation 2x / 3x / 4x / 5x / 6x
 constexpr int kFgMenuBase = 5000;
 constexpr int kUpscalerMenuBase = 5100;
@@ -1558,6 +1559,33 @@ class App
         const std::wstring v = st_.mfgCount == 0 ? std::wstring(L"auto") : std::to_wstring(st_.mfgCount);
         WritePrivateProfileStringW(st_.frameGenMode == 0 ? L"XeFG" : L"DLSSG", L"InterpolationCount", v.c_str(), ini.c_str());
     }
+    // OptiScaler's own frame limit: [Framerate] FramerateLimit = the refresh rate of the game's monitor (e.g. 75.000000)
+    void ApplyOptiFpsLimit()
+    {
+        if (!st_.optiFps)
+            return;
+        const std::wstring ini = oc::ExeDir() + L"OptiScaler.ini";
+        if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES)
+            return;
+        std::wstring device;
+        HWND w = (selected_ >= 0 && selected_ < static_cast<int>(games_.size())) ? games_[selected_].hwnd : nullptr;
+        MONITORINFOEXW mi{};
+        mi.cbSize = sizeof(mi);
+        if (w && IsWindow(w) && GetMonitorInfoW(MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST), &mi))
+            device = mi.szDevice;
+        DEVMODEW dm{};
+        dm.dmSize = sizeof(dm);
+        if (!EnumDisplaySettingsW(device.empty() ? nullptr : device.c_str(), ENUM_CURRENT_SETTINGS, &dm) || dm.dmDisplayFrequency <= 1)
+        {
+            dm = DEVMODEW{};
+            dm.dmSize = sizeof(dm);
+            if (!EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) || dm.dmDisplayFrequency <= 1)
+                return;
+        }
+        wchar_t v[32];
+        swprintf_s(v, L"%.6f", static_cast<double>(dm.dmDisplayFrequency));
+        WritePrivateProfileStringW(L"Framerate", L"FramerateLimit", v, ini.c_str());
+    }
     // "Run the upscaler on the picture": sharpness override + CAS + native upscaler pass in OptiScaler.ini.
     bool WritePictureIni(bool on)
     {
@@ -1909,6 +1937,7 @@ void App::Start()
         WritePictureIni(true); // output scaling always runs the upscaler on the picture
         ReadPictureState();
     }
+    ApplyOptiFpsLimit(); // OptiScaler's frame limit = the monitor's refresh rate
 
     const GameItem game = games_[selected_];
     if (!IsWindow(game.hwnd))
@@ -2275,8 +2304,8 @@ void App::ResizeGameWindow(bool quiet)
     mi.cbSize = sizeof(mi);
     if (!GetMonitorInfoW(MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST), &mi))
         return;
-    static const double factor[] = { 1.5, 1.7, 2.0 };
-    const double f = factor[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 2) ? st_.upscaleLevel : 1];
+    static const double factor[] = { 1.5, 1.7, 2.0, 1.0 };
+    const double f = factor[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 3) ? st_.upscaleLevel : 1];
     const int mw = mi.rcMonitor.right - mi.rcMonitor.left;
     const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
     const int cw = (static_cast<int>(mw / f + 0.5)) & ~1;
@@ -2937,6 +2966,7 @@ void App::OnClick(int id)
         if (st_.frameGenMode >= 0 && st_.frameGenMode <= 10 && st_.frameGenMode != 3)
             OnClick(kIdUpscalerApply);
         ApplyMfgCount();
+        ApplyOptiFpsLimit();
         if (st_.upscale != 0)
             WritePictureIni(true);
         ReadPictureState();
@@ -3057,6 +3087,13 @@ void App::OnClick(int id)
             }
         }
     }
+    else if (id == kIdOptiFps)
+    {
+        st_.optiFps = st_.optiFps ? 0 : 1;
+        Save();
+        SetNote(st_.optiFps ? L"OptiScaler's frame limit will be set to the monitor's refresh rate every time the game starts."
+                            : L"OptiScaler's frame limit is left as it is in OptiScaler.ini.", Note::Ok);
+    }
     else if (id == kIdLimitAuto)
     {
         st_.limitAuto = st_.limitAuto ? 0 : 1;
@@ -3149,8 +3186,8 @@ void App::OnClick(int id)
                 mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
             }
         }
-        static const wchar_t* lvName[] = { L"Quality  (1.5x", L"Balanced  (1.7x", L"Performance  (2x" };
-        static const double lvF[] = { 1.5, 1.7, 2.0 };
+        static const wchar_t* lvName[] = { L"Quality  (1.5x", L"Balanced  (1.7x", L"Performance  (2x", L"Native  (1x" };
+        static const double lvF[] = { 1.5, 1.7, 2.0, 1.0 };
         static const int methods[] = { 2, 3, 1, 4 }; // FSR 1, NIS, bilinear, FSR temporal (needs amd_fidelityfx_dx12.dll)
         static const wchar_t* mName[] = { L"FSR 1", L"NIS", L"Bilinear", L"FSR3/4" };
         HMENU menu = CreatePopupMenu();
@@ -3168,6 +3205,12 @@ void App::OnClick(int id)
                     AppendMenuW(menu, MF_STRING | ((st_.upscale == methods[m] && st_.upscaleLevel == l) ? MF_CHECKED : 0),
                                 kUpMenuBase + 1 + m * 3 + l, t.c_str());
                 }
+            {
+                // FSR3/4 Native: the game keeps its size, FSR only smooths the picture (anti-aliasing)
+                const std::wstring t = std::wstring(L"FSR3/4  \u00B7  Native  (1x), ") + std::to_wstring(mw) + L"x" + std::to_wstring(mh) +
+                                       L" \u2192 " + std::to_wstring(mw) + L"x" + std::to_wstring(mh) + L")";
+                AppendMenuW(menu, MF_STRING | ((st_.upscale == 4 && st_.upscaleLevel == 3) ? MF_CHECKED : 0), kUpMenuBase + 13, t.c_str());
+            }
             POINT pt{};
             GetCursorPos(&pt);
             const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
@@ -3178,11 +3221,11 @@ void App::OnClick(int id)
                 Save();
                 SetNote(L"Output scaling is off.", Note::Ok);
             }
-            else if (cmd > static_cast<UINT>(kUpMenuBase) && cmd <= static_cast<UINT>(kUpMenuBase + 12))
+            else if (cmd > static_cast<UINT>(kUpMenuBase) && cmd <= static_cast<UINT>(kUpMenuBase + 13))
             {
                 const int k = static_cast<int>(cmd) - kUpMenuBase - 1;
-                st_.upscale = methods[k / 3];
-                st_.upscaleLevel = k % 3;
+                st_.upscale = k == 12 ? 4 : methods[k / 3];
+                st_.upscaleLevel = k == 12 ? 3 : k % 3;
                 Save();
                 OnClick(kIdPictureOn); // the upscaler on the picture goes on with it
                 ReadPictureState();
@@ -3865,7 +3908,7 @@ void App::Paint(HDC dc, int W, int H)
 
     // ---- output scaling ----
     {
-        static const wchar_t* lvN[] = { L"Quality", L"Balanced", L"Performance" };
+        static const wchar_t* lvN[] = { L"Quality", L"Balanced", L"Performance", L"Native" };
         Text(g, L"Output scaling", *f_.bodyB, R(44, 738, 130, 24), col::Text());
 
         const gp::RectF selector = R(176, 734, 232, 32);
@@ -3875,7 +3918,7 @@ void App::Paint(HDC dc, int W, int H)
         std::wstring t = L"Off";
         if (st_.upscale != 0)
             t = std::wstring(st_.upscale == 2 ? L"FSR 1  \u00B7  " : (st_.upscale == 3 ? L"NIS  \u00B7  " : (st_.upscale == 4 ? L"FSR3/4  \u00B7  " : L"Bilinear  \u00B7  "))) +
-                lvN[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 2) ? st_.upscaleLevel : 1];
+                lvN[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 3) ? st_.upscaleLevel : 1];
         Text(g, t, *f_.chip, R(186, 740, 212, 22), col::Text());
         AddHit(selector, kIdUpSelect);
 
@@ -4032,8 +4075,19 @@ void App::Paint(HDC dc, int W, int H)
             StrokeRound(g, box, S(5), hot ? col::Accent2() : col::Line(), max(1.0f, S(1)));
             if (st_.limitAuto)
                 Text(g, L"\u2713", *f_.chip, box, col::White(), 1);
-            Text(g, L"Apply automatically when the game starts", *f_.body, R(586, 322, 306, 22), col::Text());
-            AddHit(R(560, 320, 332, 26), kIdLimitAuto);
+            Text(g, L"Apply on START", *f_.body, R(586, 322, 120, 22), col::Text());
+            AddHit(R(560, 320, 150, 26), kIdLimitAuto);
+        }
+        {
+            // OptiScaler's own limit (OptiScaler.ini [Framerate] FramerateLimit) = the monitor's refresh rate, written at every START
+            const gp::RectF box = R(722, 324, 18, 18);
+            const bool hot = hover_ == kIdOptiFps;
+            FillRound(g, box, S(5), st_.optiFps ? col::Accent() : col::Row());
+            StrokeRound(g, box, S(5), hot ? col::Accent2() : col::Line(), max(1.0f, S(1)));
+            if (st_.optiFps)
+                Text(g, L"\u2713", *f_.chip, box, col::White(), 1);
+            Text(g, L"OptiScaler FPS = Hz", *f_.body, R(748, 322, 150, 22), col::Text());
+            AddHit(R(722, 320, 172, 26), kIdOptiFps);
         }
         Text(g, limitInfo_.empty() ? std::wstring(L"Needs RivaTuner Statistics Server (async / front / back edge sync).") : limitInfo_,
              *f_.tiny, R(560, 348, 332, 14), col::Muted());

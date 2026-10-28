@@ -36,7 +36,7 @@ struct Settings
     UINT fgKey = VK_END;         // frame generation on/off (FGShortcutKey)
     int presentMode = 3;      // 0 auto (FG on: no wait, FG off: VSync), 1 always interval 0, 2 always interval 1, 3 classic 2.2.0 behaviour, 4 Lossless-style (tearing, latency 1), 5 classic + exactly refresh/2 base frames, 6 classic + unlimited capture (no half-refresh limit)
     int upscale = 0;          // output scaling: 0 off, 1 bilinear, 2 FSR1 (EASU+RCAS), 3 NIS, 4 FSR3/4 (motion measured from the frames + AMD runtime); read at start
-    int upscaleLevel = 1;     // input size: 0 Quality 67%, 1 Balanced 58%, 2 Performance 50% (launcher resizes the window)
+    int upscaleLevel = 1;     // input size: 0 Quality 67%, 1 Balanced 58%, 2 Performance 50%, 3 Native 100% (FSR3/4 only: anti-aliasing, no resize)
     int labelSeconds = 8;     // output scaling: show "720 to 1080" in the corner for this many seconds (0 never, 999 always)
     int nisSharp = 50;        // NIS sharpness x100 (0..100)
     int upscaleSharp = 25;    // FSR1 RCAS sharpness x100 (0 = sharpest, 200 = none), default 0.25
@@ -46,6 +46,7 @@ struct Settings
     int limitMode = 1;        // RTSS limiter mode: 0 async, 1 front edge sync, 2 back edge sync
     int profileAuto = 0;      // apply a saved game profile automatically when its game is picked
     int hideOsd = 1;          // turn the RTSS on-screen display of the game off while the host runs
+    int optiFps = 1;          // write OptiScaler.ini [Framerate] FramerateLimit = the monitor's refresh rate at every START
     int limitAuto = 0;        // apply the RTSS limiter every time START is pressed
     int limitFps = 0;         // 0 refresh rate, -2 half refresh rate, else fixed fps
     int boost = 3;            // performance mode, read by the host at start-up: 0 off, 1 CPU, 2 CPU + GPU high, 3 max
@@ -114,7 +115,7 @@ inline void LoadSettings(Settings& s)
     s.upscale = GetPrivateProfileIntW(L"Upscale", L"Method", 0, path.c_str());
     if (s.upscale < 0 || s.upscale > 4) s.upscale = 0;
     s.upscaleLevel = GetPrivateProfileIntW(L"Upscale", L"Level", 1, path.c_str());
-    if (s.upscaleLevel < 0 || s.upscaleLevel > 2) s.upscaleLevel = 1;
+    if (s.upscaleLevel < 0 || s.upscaleLevel > 3) s.upscaleLevel = 1;
     s.nisSharp = GetPrivateProfileIntW(L"Upscale", L"NisSharpness", 50, path.c_str());
     if (s.nisSharp < 0 || s.nisSharp > 100) s.nisSharp = 50;
     s.labelSeconds = GetPrivateProfileIntW(L"Upscale", L"LabelSeconds", 8, path.c_str());
@@ -128,6 +129,7 @@ inline void LoadSettings(Settings& s)
     s.limitFps = GetPrivateProfileIntW(L"Limiter", L"Fps", 0, path.c_str());
     s.profileAuto = GetPrivateProfileIntW(L"Profiles", L"Auto", 0, path.c_str()) != 0 ? 1 : 0;
     s.hideOsd = GetPrivateProfileIntW(L"Limiter", L"HideOsd", 1, path.c_str()) != 0 ? 1 : 0;
+    s.optiFps = GetPrivateProfileIntW(L"Limiter", L"OptiFps", 1, path.c_str()) != 0 ? 1 : 0;
     s.limitAuto = GetPrivateProfileIntW(L"Limiter", L"Auto", 0, path.c_str()) != 0 ? 1 : 0;
     s.limitMode = GetPrivateProfileIntW(L"Limiter", L"Mode", 1, path.c_str());
     if (s.limitMode < 0 || s.limitMode > 2) s.limitMode = 1;
@@ -179,6 +181,7 @@ inline void SaveSettings(const Settings& s)
     WritePrivateProfileStringW(L"Limiter", L"Target", std::to_wstring(s.limitTarget).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Profiles", L"Auto", std::to_wstring(s.profileAuto).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"HideOsd", std::to_wstring(s.hideOsd).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"Limiter", L"OptiFps", std::to_wstring(s.optiFps).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"Auto", std::to_wstring(s.limitAuto).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"Mode", std::to_wstring(s.limitMode).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"Fps", std::to_wstring(s.limitFps).c_str(), path.c_str());
