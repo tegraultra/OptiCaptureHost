@@ -35,7 +35,7 @@ struct Settings
     UINT fpsCycleKey = VK_NEXT;  // FPS overlay type (FpsCycleShortcutKey)
     UINT fgKey = VK_END;         // frame generation on/off (FGShortcutKey)
     int presentMode = 3;      // 0 auto (FG on: no wait, FG off: VSync), 1 always interval 0, 2 always interval 1, 3 classic 2.2.0 behaviour, 4 Lossless-style (tearing, latency 1), 5 classic + exactly refresh/2 base frames, 6 classic + unlimited capture (no half-refresh limit)
-    int upscale = 0;          // output scaling: 0 off, 1 bilinear, 2 FSR1 (EASU+RCAS), 3 NIS, 4 FSR temporal (motion measured from the frames + AMD runtime); read at start
+    int upscale = 0;          // output scaling: 0 off, 1 bilinear, 2 FSR1 (EASU+RCAS), 3 NIS, 4 FSR3/4 (motion measured from the frames + AMD runtime); read at start
     int upscaleLevel = 1;     // input size: 0 Quality 67%, 1 Balanced 58%, 2 Performance 50% (launcher resizes the window)
     int labelSeconds = 8;     // output scaling: show "720 to 1080" in the corner for this many seconds (0 never, 999 always)
     int nisSharp = 50;        // NIS sharpness x100 (0..100)

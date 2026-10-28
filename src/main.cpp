@@ -892,7 +892,7 @@ bool Host::InitOverlayAndSwapChain()
         }
         if (upOn_)
         {
-            Log("Output scaling: %s, %ux%u -> %ux%u (sharpness %.2f)", st_.upscale == 1 ? "bilinear" : (st_.upscale == 3 ? "NIS" : (st_.upscale == 4 ? "FSR temporal" : "FSR 1")), width_, height_,
+            Log("Output scaling: %s, %ux%u -> %ux%u (sharpness %.2f)", st_.upscale == 1 ? "bilinear" : (st_.upscale == 3 ? "NIS" : (st_.upscale == 4 ? "FSR3/4" : "FSR 1")), width_, height_,
                 outW_, outH_, ((st_.upscale == 3 || st_.upscale == 4) ? st_.nisSharp : st_.upscaleSharp) / 100.0);
         }
         else
@@ -1040,7 +1040,7 @@ void Host::CreateLabel()
     mi.cbSize = sizeof(mi);
     if (!GetMonitorInfoW(MonitorFromWindow(target_, MONITOR_DEFAULTTONEAREST), &mi))
         return;
-    static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR temporal" };
+    static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR3/4" };
     wchar_t text[64];
     labelH_ = height_;
     swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 4) ? upMethod_ : 0]);
@@ -1061,7 +1061,7 @@ void Host::UpdateLabel()
     {
         if (label_)
         {
-            static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR temporal" };
+            static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR3/4" };
             wchar_t text[64];
             labelH_ = height_;
             swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 4) ? upMethod_ : 0]);
