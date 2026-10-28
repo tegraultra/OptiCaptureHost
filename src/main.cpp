@@ -61,6 +61,11 @@
 #include "upscale_shader.h"
 #include "nis_shader.h"
 #include "nis_config.h"
+#include "fsr_flow_shader.h"
+#include "ffx_api/ffx_api.h"
+#include "ffx_api/ffx_upscale.h"
+#include "ffx_api/ffx_api_loader.h"
+#include "ffx_api/dx12/ffx_api_dx12.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "winmm.lib")
@@ -499,6 +504,10 @@ class Host
     bool InitOverlayAndSwapChain();
     bool InitUpscale();
     bool CreateUpscaleViews();
+    bool InitFsrPipelines();
+    bool InitFsrTemporal();
+    void ReleaseFsrTemporal();
+    void RecordFsrTemporal();
     void RecordUpscale(ID3D12Resource* bb, UINT idx);
     void OverlayPlace(const RECT& game, int& x, int& y);
     bool CreateShared();
@@ -545,6 +554,18 @@ class Host
     ComPtr<ID3D12PipelineState> nisPso_;
     ComPtr<ID3D12Resource> nisOut_, nisCoef_[2], nisUpload_;
     bool nisCoefDone_ = false;
+    // Temporal FSR (Upscale method 4): motion measured from the captured frames, AMD's FidelityFX runtime does the upscaling.
+    HMODULE ffxModule_ = nullptr;
+    ffxFunctions ffxFn_{};
+    ffxContext ffxCtx_ = nullptr;
+    ComPtr<ID3D12RootSignature> fsrRoot_;
+    ComPtr<ID3D12PipelineState> fsrBlockPso_, fsrPixelPso_;
+    ComPtr<ID3D12Resource> fsrTex_[2], fsrBlk_, fsrMv_, fsrDepth_, fsrOut_;
+    bool fsrPipesOk_ = false;
+    bool fsrReady_ = false;
+    bool fsrHavePrev_ = false;
+    int fsrCur_ = 1;
+    std::chrono::steady_clock::time_point fsrLast_{};
     UINT upSrvInc_ = 0;
     UINT upRtvInc_ = 0;
     bool interactive_ = false;
@@ -871,8 +892,8 @@ bool Host::InitOverlayAndSwapChain()
         }
         if (upOn_)
         {
-            Log("Output scaling: %s, %ux%u -> %ux%u (sharpness %.2f)", st_.upscale == 1 ? "bilinear" : (st_.upscale == 3 ? "NIS" : "FSR 1"), width_, height_,
-                outW_, outH_, (st_.upscale == 3 ? st_.nisSharp : st_.upscaleSharp) / 100.0);
+            Log("Output scaling: %s, %ux%u -> %ux%u (sharpness %.2f)", st_.upscale == 1 ? "bilinear" : (st_.upscale == 3 ? "NIS" : (st_.upscale == 4 ? "FSR temporal" : "FSR 1")), width_, height_,
+                outW_, outH_, ((st_.upscale == 3 || st_.upscale == 4) ? st_.nisSharp : st_.upscaleSharp) / 100.0);
         }
         else
         {
@@ -1019,10 +1040,10 @@ void Host::CreateLabel()
     mi.cbSize = sizeof(mi);
     if (!GetMonitorInfoW(MonitorFromWindow(target_, MONITOR_DEFAULTTONEAREST), &mi))
         return;
-    static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS" };
+    static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR temporal" };
     wchar_t text[64];
     labelH_ = height_;
-    swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 3) ? upMethod_ : 0]);
+    swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 4) ? upMethod_ : 0]);
     label_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT, wc.lpszClassName,
                              text, WS_POPUP, mi.rcMonitor.left + 16, mi.rcMonitor.top + 16, 270, 40, nullptr, nullptr, inst_, nullptr);
     if (!label_)
@@ -1040,10 +1061,10 @@ void Host::UpdateLabel()
     {
         if (label_)
         {
-            static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS" };
+            static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR temporal" };
             wchar_t text[64];
             labelH_ = height_;
-            swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 3) ? upMethod_ : 0]);
+            swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 4) ? upMethod_ : 0]);
             SetWindowTextW(label_, text);
             InvalidateRect(label_, nullptr, TRUE);
             labelUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(st_.labelSeconds);
@@ -1224,7 +1245,8 @@ bool Host::InitUpscale()
     // Descriptor heaps: SRV 0 = the captured picture, SRV 1 = the EASU result; RTV 0 = the EASU result, 1.. = back buffers.
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 6; // 0 captured picture, 1-2 NIS coefficients, 3 EASU result, 4 NIS output (UAV), 5 NIS output (SRV)
+    hd.NumDescriptors = 16; // 0 captured picture, 1-2 NIS coefficients, 3 EASU result, 4 NIS output (UAV), 5 NIS output (SRV),
+                            // 6 temporal FSR output (SRV), 7-9 flow inputs (frame A, B, block vectors), 10-12 flow outputs (UAV), 13-15 flow inputs (B, A, block vectors)
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev12_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&upSrvHeap_))))
         return false;
@@ -1408,7 +1430,322 @@ bool Host::InitUpscale()
         oh.ptr += static_cast<SIZE_T>(upSrvInc_) * 5;
         dev12_->CreateShaderResourceView(nisOut_.Get(), &ov, oh);
     }
+    if (st_.upscale == 4)
+        fsrPipesOk_ = InitFsrPipelines(); // on failure CreateUpscaleViews falls back to FSR 1
     return true;
+}
+
+// Temporal FSR: the two compute passes that measure motion (fsr_flow_shader.h).
+bool Host::InitFsrPipelines()
+{
+    fsrRoot_.Reset();
+    fsrBlockPso_.Reset();
+    fsrPixelPso_.Reset();
+    D3D12_DESCRIPTOR_RANGE ranges[2]{};
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[0].NumDescriptors = 3;
+    ranges[0].OffsetInDescriptorsFromTableStart = 0;
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    ranges[1].NumDescriptors = 3;
+    ranges[1].OffsetInDescriptorsFromTableStart = 0;
+    D3D12_ROOT_PARAMETER rp[3]{};
+    rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rp[0].Constants.Num32BitValues = 4;
+    rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rp[1].DescriptorTable.NumDescriptorRanges = 1;
+    rp[1].DescriptorTable.pDescriptorRanges = &ranges[0];
+    rp[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rp[2].DescriptorTable.NumDescriptorRanges = 1;
+    rp[2].DescriptorTable.pDescriptorRanges = &ranges[1];
+    D3D12_ROOT_SIGNATURE_DESC rsd{};
+    rsd.NumParameters = 3;
+    rsd.pParameters = rp;
+    ComPtr<ID3DBlob> sig, err;
+    if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
+        FAILED(dev12_->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&fsrRoot_))))
+    {
+        Log("Temporal FSR: root signature failed");
+        return false;
+    }
+    auto make = [&](const char* entry, ComPtr<ID3D12PipelineState>& pso) {
+        ComPtr<ID3DBlob> cs, e;
+        const HRESULT h = D3DCompile(kFsrFlowHlsl, sizeof(kFsrFlowHlsl) - 1, "fsr_flow.hlsl", nullptr, nullptr, entry, "cs_5_0",
+                                     D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &cs, &e);
+        if (FAILED(h))
+        {
+            Log("Temporal FSR: shader %s failed: 0x%08X %s", entry, static_cast<unsigned>(h),
+                e ? static_cast<const char*>(e->GetBufferPointer()) : "");
+            return false;
+        }
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature = fsrRoot_.Get();
+        pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
+        const HRESULT h2 = dev12_->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso));
+        if (FAILED(h2))
+            Log("Temporal FSR: pipeline %s failed: 0x%08X", entry, static_cast<unsigned>(h2));
+        return SUCCEEDED(h2);
+    };
+    return make("CSBlock", fsrBlockPso_) && make("CSPixel", fsrPixelPso_);
+}
+
+static void FfxMessage(uint32_t type, const wchar_t* message)
+{
+    if (!message)
+        return;
+    char text[400] = {};
+    WideCharToMultiByte(CP_UTF8, 0, message, -1, text, static_cast<int>(sizeof(text)) - 1, nullptr, nullptr);
+    Log("FSR %s: %s", type == FFX_API_MESSAGE_TYPE_ERROR ? "error" : "warning", text);
+}
+
+void Host::ReleaseFsrTemporal()
+{
+    fsrReady_ = false;
+    fsrHavePrev_ = false;
+    if (ffxCtx_ && ffxFn_.DestroyContext)
+        ffxFn_.DestroyContext(&ffxCtx_, nullptr);
+    ffxCtx_ = nullptr;
+    fsrTex_[0].Reset();
+    fsrTex_[1].Reset();
+    fsrBlk_.Reset();
+    fsrMv_.Reset();
+    fsrDepth_.Reset();
+    fsrOut_.Reset();
+}
+
+// The captured frame's size is fixed per shared texture: everything that depends on it (frame copies, vectors, depth, output and AMD's
+// context) is made again whenever the shared texture is.
+bool Host::InitFsrTemporal()
+{
+    if (!fsrPipesOk_ || !upSrvHeap_)
+        return false;
+    WaitGpu();
+    ReleaseFsrTemporal();
+
+    if (!ffxModule_)
+    {
+        // AMD's FidelityFX runtime (SDK 2.x holds FSR 3.1 and FSR 4): next to the program, or in an "fsr" / "FSR 4" folder there
+        const std::wstring root = oc::ExeDir();
+        const wchar_t* dirs[] = { L"", L"fsr\\", L"FSR\\", L"FSR 4\\", L"FSR4\\", L"FSR_4\\", L"FSR-4\\" };
+        const wchar_t* files[] = { L"amd_fidelityfx_dx12.dll", L"amd_fidelityfx_loader_dx12.dll" };
+        for (const wchar_t* d : dirs)
+        {
+            for (const wchar_t* f : files)
+            {
+                const std::wstring path = root + d + f;
+                if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+                    continue;
+                HMODULE m = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+                if (!m)
+                {
+                    Log("Temporal FSR: %ls could not be loaded (error %lu)", path.c_str(), GetLastError());
+                    continue;
+                }
+                ffxFunctions fn{};
+                ffxLoadFunctions(&fn, m);
+                if (!fn.CreateContext || !fn.DestroyContext || !fn.Dispatch)
+                {
+                    Log("Temporal FSR: %ls has no FidelityFX API", path.c_str());
+                    FreeLibrary(m);
+                    continue;
+                }
+                ffxModule_ = m;
+                ffxFn_ = fn;
+                Log("Temporal FSR: runtime %ls", path.c_str());
+                break;
+            }
+            if (ffxModule_)
+                break;
+        }
+        if (!ffxModule_)
+        {
+            Log("Temporal FSR: amd_fidelityfx_dx12.dll was not found next to the program (or in an \"fsr\" / \"FSR 4\" folder)");
+            return false;
+        }
+    }
+
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    auto make = [&](ComPtr<ID3D12Resource>& r, UINT w, UINT h, DXGI_FORMAT fmt, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES st) {
+        D3D12_RESOURCE_DESC d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        d.Width = w;
+        d.Height = h;
+        d.DepthOrArraySize = 1;
+        d.MipLevels = 1;
+        d.Format = fmt;
+        d.SampleDesc.Count = 1;
+        d.Flags = flags;
+        return SUCCEEDED(dev12_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, st, nullptr, IID_PPV_ARGS(&r)));
+    };
+    const UINT bw = (width_ + 3) / 4, bh = (height_ + 3) / 4;
+    const D3D12_RESOURCE_STATES nps = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    if (!make(fsrTex_[0], width_, height_, kFormat, D3D12_RESOURCE_FLAG_NONE, nps) ||
+        !make(fsrTex_[1], width_, height_, kFormat, D3D12_RESOURCE_FLAG_NONE, nps) ||
+        !make(fsrBlk_, bw, bh, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, nps) ||
+        !make(fsrMv_, width_, height_, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, nps) ||
+        !make(fsrDepth_, width_, height_, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, nps) ||
+        !make(fsrOut_, outW_, outH_, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE))
+    {
+        Log("Temporal FSR: textures could not be made");
+        ReleaseFsrTemporal();
+        return false;
+    }
+
+    // descriptors (see InitUpscale's layout)
+    auto cpu = [&](UINT n) {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = upSrvHeap_->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(upSrvInc_) * n;
+        return h;
+    };
+    auto srv = [&](ID3D12Resource* r, DXGI_FORMAT fmt, UINT n) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format = fmt;
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Texture2D.MipLevels = 1;
+        dev12_->CreateShaderResourceView(r, &sv, cpu(n));
+    };
+    auto uav = [&](ID3D12Resource* r, DXGI_FORMAT fmt, UINT n) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
+        uv.Format = fmt;
+        uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        dev12_->CreateUnorderedAccessView(r, nullptr, &uv, cpu(n));
+    };
+    srv(fsrOut_.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, 6);
+    srv(fsrTex_[0].Get(), kFormat, 7);
+    srv(fsrTex_[1].Get(), kFormat, 8);
+    srv(fsrBlk_.Get(), DXGI_FORMAT_R16G16_FLOAT, 9);
+    uav(fsrBlk_.Get(), DXGI_FORMAT_R16G16_FLOAT, 10);
+    uav(fsrMv_.Get(), DXGI_FORMAT_R16G16_FLOAT, 11);
+    uav(fsrDepth_.Get(), DXGI_FORMAT_R32_FLOAT, 12);
+    srv(fsrTex_[1].Get(), kFormat, 13);
+    srv(fsrTex_[0].Get(), kFormat, 14);
+    srv(fsrBlk_.Get(), DXGI_FORMAT_R16G16_FLOAT, 15);
+
+    // AMD's upscaling context: gamma-encoded colour (the frame as the game shows it), no jitter, flat depth
+    ffxCreateBackendDX12Desc backendDesc{};
+    backendDesc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
+    backendDesc.device = dev12_.Get();
+    // SDK 2.x runtimes (FSR 4) ask for the API version the program was built against: type 0x0001000b, version 4.1.1
+    struct VersionDesc { ffxCreateContextDescHeader header; uint32_t version; } versionDesc{};
+    versionDesc.header.type = 0x0001000bu;
+    versionDesc.version = (4u << 22) | (1u << 12) | 1u;
+    versionDesc.header.pNext = &backendDesc.header;
+    ffxCreateContextDescUpscale desc{};
+    desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+    desc.header.pNext = &versionDesc.header;
+    desc.flags = FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE;
+    desc.maxRenderSize = { width_, height_ };
+    desc.maxUpscaleSize = { outW_, outH_ };
+    desc.fpMessage = FfxMessage;
+    const ffxReturnCode_t rc = ffxFn_.CreateContext(&ffxCtx_, &desc.header, nullptr);
+    if (rc != FFX_API_RETURN_OK || !ffxCtx_)
+    {
+        ffxCtx_ = nullptr;
+        Log("Temporal FSR: AMD's runtime could not make its upscaling context (code %u)", static_cast<unsigned>(rc));
+        ReleaseFsrTemporal();
+        return false;
+    }
+    if (ffxFn_.Query)
+    {
+        ffxQueryGetProviderVersion used{};
+        used.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+        if (ffxFn_.Query(&ffxCtx_, &used.header) == FFX_API_RETURN_OK && used.versionName)
+            Log("Temporal FSR: the runtime runs %s", used.versionName);
+    }
+    fsrReady_ = true;
+    fsrHavePrev_ = false;
+    fsrCur_ = 1;
+    fsrLast_ = std::chrono::steady_clock::now();
+    Log("Temporal FSR: %ux%u -> %ux%u", width_, height_, outW_, outH_);
+    return true;
+}
+
+// Per frame, before the final pass: the captured frame is copied, its motion measured against the frame before, and AMD's upscaler runs.
+void Host::RecordFsrTemporal()
+{
+    auto barrier = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = r;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = from;
+        b.Transition.StateAfter = to;
+        list_->ResourceBarrier(1, &b);
+    };
+    const D3D12_RESOURCE_STATES nps = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    fsrCur_ ^= 1;
+    ID3D12Resource* curTex = fsrTex_[fsrCur_].Get();
+    barrier(curTex, nps, D3D12_RESOURCE_STATE_COPY_DEST);
+    list_->CopyResource(curTex, shared12_.Get());
+    barrier(curTex, D3D12_RESOURCE_STATE_COPY_DEST, nps);
+
+    ID3D12DescriptorHeap* heaps[] = { upSrvHeap_.Get() };
+    list_->SetDescriptorHeaps(1, heaps);
+    list_->SetComputeRootSignature(fsrRoot_.Get());
+    const D3D12_GPU_DESCRIPTOR_HANDLE base = upSrvHeap_->GetGPUDescriptorHandleForHeapStart();
+    auto slot = [&](UINT n) {
+        D3D12_GPU_DESCRIPTOR_HANDLE h = base;
+        h.ptr += static_cast<UINT64>(upSrvInc_) * n;
+        return h;
+    };
+    const UINT bw = (width_ + 3) / 4, bh = (height_ + 3) / 4;
+    const UINT consts[4] = { width_, height_, bw, bh };
+    list_->SetComputeRoot32BitConstants(0, 4, consts, 0);
+    list_->SetComputeRootDescriptorTable(1, slot(fsrCur_ == 0 ? 7 : 13)); // current frame, frame before, block vectors
+    list_->SetComputeRootDescriptorTable(2, slot(10));
+
+    barrier(fsrBlk_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    list_->SetPipelineState(fsrBlockPso_.Get());
+    list_->Dispatch((bw + 7) / 8, (bh + 7) / 8, 1);
+    barrier(fsrBlk_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+
+    barrier(fsrMv_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    barrier(fsrDepth_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    list_->SetPipelineState(fsrPixelPso_.Get());
+    list_->Dispatch((width_ + 7) / 8, (height_ + 7) / 8, 1);
+    barrier(fsrMv_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+    barrier(fsrDepth_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+
+    const auto now = std::chrono::steady_clock::now();
+    float frameMs = static_cast<float>(std::chrono::duration<double, std::milli>(now - fsrLast_).count());
+    fsrLast_ = now;
+    if (frameMs < 1.0f || frameMs > 250.0f)
+        frameMs = 16.6f;
+
+    barrier(fsrOut_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    ffxDispatchDescUpscale d{};
+    d.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
+    d.commandList = list_.Get();
+    d.color = ffxApiGetResourceDX12(curTex, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    d.depth = ffxApiGetResourceDX12(fsrDepth_.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    d.motionVectors = ffxApiGetResourceDX12(fsrMv_.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    d.output = ffxApiGetResourceDX12(fsrOut_.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+    d.jitterOffset = { 0.0f, 0.0f };
+    d.motionVectorScale = { 1.0f, 1.0f }; // vectors in the captured picture's pixels
+    d.renderSize = { width_, height_ };
+    d.upscaleSize = { outW_, outH_ };
+    d.enableSharpening = st_.nisSharp > 0;
+    d.sharpness = std::clamp(static_cast<float>(st_.nisSharp) / 100.0f, 0.0f, 1.0f);
+    d.frameTimeDelta = frameMs;
+    d.preExposure = 1.0f;
+    d.reset = !fsrHavePrev_;
+    d.cameraNear = 0.1f;
+    d.cameraFar = 1000.0f;
+    d.cameraFovAngleVertical = 1.0f;
+    d.viewSpaceToMetersFactor = 1.0f; // the depth is flat anyway
+    d.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
+    const ffxReturnCode_t rc = ffxFn_.Dispatch(&ffxCtx_, &d.header);
+    if (rc != FFX_API_RETURN_OK)
+    {
+        static int logged = 0;
+        if (logged++ < 5)
+            Log("Temporal FSR: dispatch failed (code %u)", static_cast<unsigned>(rc));
+    }
+    barrier(fsrOut_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    fsrHavePrev_ = true;
 }
 
 // The shared texture is recreated whenever the game's picture size changes: point SRV 0 at the new one.
@@ -1422,6 +1759,11 @@ bool Host::CreateUpscaleViews()
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Texture2D.MipLevels = 1;
     dev12_->CreateShaderResourceView(shared12_.Get(), &sv, upSrvHeap_->GetCPUDescriptorHandleForHeapStart());
+    if (upMethod_ == 4 && !InitFsrTemporal())
+    {
+        Log("Output scaling: temporal FSR is not available, using FSR 1 instead");
+        upMethod_ = 2;
+    }
     return true;
 }
 
@@ -1444,6 +1786,10 @@ void Host::RecordUpscale(ID3D12Resource* bb, UINT idx)
         b.Transition.StateAfter = to;
         list_->ResourceBarrier(1, &b);
     };
+
+    const bool fsrTemporal = upMethod_ == 4 && fsrReady_;
+    if (fsrTemporal)
+        RecordFsrTemporal(); // changes the list's heap and root signature: the graphics ones are set again below
 
     ID3D12DescriptorHeap* heaps[] = { upSrvHeap_.Get() };
     list_->SetDescriptorHeaps(1, heaps);
@@ -1473,7 +1819,7 @@ void Host::RecordUpscale(ID3D12Resource* bb, UINT idx)
     const float ouH = static_cast<float>(outH_);
     UINT c[16] = {};
 
-    D3D12_GPU_DESCRIPTOR_HANDLE finalSrc = srv0;
+    D3D12_GPU_DESCRIPTOR_HANDLE finalSrc = fsrTemporal ? slot(6) : srv0;
     if (upMethod_ == 3 && nisPso_)
     {
         if (!nisCoefDone_)
@@ -2122,6 +2468,9 @@ void Host::Shutdown()
     }
 
     WaitGpu();
+    if (ffxCtx_ && ffxFn_.DestroyContext)
+        ffxFn_.DestroyContext(&ffxCtx_, nullptr);
+    ffxCtx_ = nullptr;
     UnregisterHotkeys();
     if (parentProc_)
         CloseHandle(parentProc_);
