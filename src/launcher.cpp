@@ -1470,7 +1470,7 @@ class App
     bool PresetActive(int k) const
     {
         return st_.frameGenMode == PresetFg(k) && st_.limitFps == PresetLimit(k) && st_.limitAuto == 1 && st_.limitTarget != 0 &&
-               st_.presentMode == 6;
+               st_.presentMode == 6 && (k <= 3 || (st_.upscale == 3 && st_.upscaleLevel == 0));
     }
     void ApplyPreset(int k)
     {
@@ -1480,7 +1480,18 @@ class App
         if (st_.limitTarget == 0)
             st_.limitTarget = 1; // the game's own profile
         st_.presentMode = 6;
+        if (k >= 4)
+        {
+            // OLD GPU modes: Output scaling with NIS on Quality (the game window is made smaller at START)
+            st_.upscale = 3;
+            st_.upscaleLevel = 0;
+        }
         Save();
+        if (k >= 4)
+        {
+            OnClick(kIdPictureOn); // the upscaler on the picture goes on with it
+            ReadPictureState();
+        }
         static const wchar_t* const names[] = { L"NO FG MOD", L"x2 FG MOD (NEW GPU)", L"x3 FG MOD (NEW GPU)", L"x4 FG MOD (NEW GPU)",
                                                 L"x2 FG MOD (OLD GPU)", L"x3 FG MOD (OLD GPU)", L"x4 FG MOD (OLD GPU)" };
         SetNote(std::wstring(names[k]) + L": limiter, present mode and frame generation set.", Note::Ok);
