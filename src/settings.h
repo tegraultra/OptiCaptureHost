@@ -40,6 +40,7 @@ struct Settings
     int labelSeconds = 8;     // output scaling: show "720 to 1080" in the corner for this many seconds (0 never, 999 always)
     int nisSharp = 50;        // NIS sharpness x100 (0..100)
     int upscaleSharp = 25;    // FSR1 RCAS sharpness x100 (0 = sharpest, 200 = none), default 0.25
+    int mfgCount = 0;         // multi frame generation: 0 auto, 1..5 = 2x..6x (InterpolationCount in OptiScaler.ini)
     int presentDelay = 3;     // ms the host holds each frame before Present, 0..12
     int limitTarget = 0;      // RTSS limiter: 0 off, 1 game, 2 host, 3 global
     int limitMode = 1;        // RTSS limiter mode: 0 async, 1 front edge sync, 2 back edge sync
@@ -102,6 +103,9 @@ inline void LoadSettings(Settings& s)
     s.frameGenMode = GetPrivateProfileIntW(L"Settings", L"FrameGenMode", 0, path.c_str());
     if (s.frameGenMode < 0 || s.frameGenMode > 10 || s.frameGenMode == 3) s.frameGenMode = 0; // 3 (FSR Frame Generation) was removed; 9 = "FSR FG AL2" folder, 10 = "FSR FG LF" folder
 
+    s.mfgCount = GetPrivateProfileIntW(L"Settings", L"MfgCount", 0, path.c_str());
+    if (s.mfgCount < 0 || s.mfgCount > 5) s.mfgCount = 0;
+
     s.upscalerMode = GetPrivateProfileIntW(L"Settings", L"UpscalerMode", 0, path.c_str());
     if (s.upscalerMode < 0 || s.upscalerMode > 4) s.upscalerMode = 0;
 
@@ -163,6 +167,7 @@ inline void SaveSettings(const Settings& s)
 
     WritePrivateProfileStringW(L"General", L"VSync", s.vsync ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"Settings", L"FrameGenMode", std::to_wstring(s.frameGenMode).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"Settings", L"MfgCount", std::to_wstring(s.mfgCount).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Settings", L"UpscalerMode", std::to_wstring(s.upscalerMode).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Advanced", L"PresentMode", std::to_wstring(s.presentMode).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Upscale", L"Method", std::to_wstring(s.upscale).c_str(), path.c_str());

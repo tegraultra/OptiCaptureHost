@@ -70,6 +70,7 @@ constexpr int kIdLinkJH = 8;
 constexpr int kIdLinkApps = 9;
 constexpr int kIdLinkArchive = 10;
 constexpr int kIdLinkDonate = 50;
+constexpr int kIdMfg0 = 60; // 60..64: multi frame generation 2x / 3x / 4x / 5x / 6x
 constexpr int kFgMenuBase = 5000;
 constexpr int kUpscalerMenuBase = 5100;
 constexpr int kIdBoostSelect = 13;
@@ -1467,14 +1468,16 @@ class App
     // NO FG or Intel MFG.
     static int PresetFg(int k) { return k == 0 ? 2 : (k <= 3 ? 0 : 1); }   // NO FG, Intel MFG (new GPU), Artur (old GPU)
     static int PresetLimit(int k) { return k == 0 ? 0 : (k <= 3 ? -(k + 1) : -(k - 2)); }
+    static int PresetMfg(int k) { return k == 0 ? 0 : (k <= 3 ? k : k - 3); } // x2 / x3 / x4 -> 1 / 2 / 3
     bool PresetActive(int k) const
     {
-        return st_.frameGenMode == PresetFg(k) && st_.limitFps == PresetLimit(k) && st_.limitAuto == 1 && st_.limitTarget != 0 &&
+        return st_.frameGenMode == PresetFg(k) && st_.mfgCount == PresetMfg(k) && st_.limitFps == PresetLimit(k) && st_.limitAuto == 1 && st_.limitTarget != 0 &&
                st_.presentMode == 6 && (k <= 3 || (st_.upscale == 3 && st_.upscaleLevel == 0));
     }
     void ApplyPreset(int k)
     {
         st_.frameGenMode = PresetFg(k);
+        st_.mfgCount = PresetMfg(k);
         st_.limitFps = PresetLimit(k);
         st_.limitAuto = 1;
         if (st_.limitTarget == 0)
@@ -1487,15 +1490,10 @@ class App
             st_.upscaleLevel = 0;
         }
         Save();
-        if (k >= 4)
-        {
-            OnClick(kIdPictureOn); // the upscaler on the picture goes on with it
-            ReadPictureState();
-        }
         static const wchar_t* const names[] = { L"NO FG MOD", L"x2 FG MOD (NEW GPU)", L"x3 FG MOD (NEW GPU)", L"x4 FG MOD (NEW GPU)",
                                                 L"x2 FG MOD (OLD GPU)", L"x3 FG MOD (OLD GPU)", L"x4 FG MOD (OLD GPU)" };
         SetNote(std::wstring(names[k]) + L": limiter, present mode and frame generation set.", Note::Ok);
-        OnClick(kIdFrameGenApply); // writes OptiScaler.ini for the chosen frame generation
+        OnClick(kIdFrameGenApply); // writes OptiScaler.ini for the chosen frame generation (and the picture upscaler when output scaling is on)
     }
     gp::RectF upSliderRect_{};
     bool upSliding_ = false;
@@ -1548,6 +1546,30 @@ class App
         WritePrivateProfileStringW(L"ProfileSlot", exe.c_str(), std::to_wstring(slot).c_str(), oc::SettingsPath().c_str());
     }
     void OfferProfile();
+    // Multi frame generation count: Intel MFG -> [XeFG], Artur / Combo / Nvidia MFG -> [DLSSG]; "auto" or 1..3 (2x..4x).
+    static bool MfgMode(int fg) { return fg == 0 || fg == 1 || fg == 5 || fg == 8; }
+    void ApplyMfgCount()
+    {
+        if (!MfgMode(st_.frameGenMode))
+            return;
+        const std::wstring ini = oc::ExeDir() + L"OptiScaler.ini";
+        if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES)
+            return;
+        const std::wstring v = st_.mfgCount == 0 ? std::wstring(L"auto") : std::to_wstring(st_.mfgCount);
+        WritePrivateProfileStringW(st_.frameGenMode == 0 ? L"XeFG" : L"DLSSG", L"InterpolationCount", v.c_str(), ini.c_str());
+    }
+    // "Run the upscaler on the picture": sharpness override + CAS + native upscaler pass in OptiScaler.ini.
+    bool WritePictureIni(bool on)
+    {
+        const std::wstring iniPath = oc::ExeDir() + L"OptiScaler.ini";
+        const wchar_t* v = on ? L"true" : L"false";
+        bool ok = WritePrivateProfileStringW(L"Sharpness", L"OverrideSharpness", v, iniPath.c_str()) != 0;
+        if (on)
+            ok = WritePrivateProfileStringW(L"Sharpness", L"Sharpness", L"0.600000", iniPath.c_str()) != 0 && ok;
+        ok = WritePrivateProfileStringW(L"CAS", L"Enabled", v, iniPath.c_str()) != 0 && ok;
+        ok = WritePrivateProfileStringW(L"DlssNr", L"NativeUpscalerPass", v, iniPath.c_str()) != 0 && ok;
+        return ok;
+    }
     bool pictureOn_ = false; // [CAS] Enabled in OptiScaler.ini
     void ReadPictureState()
     {
@@ -1880,6 +1902,12 @@ void App::Start()
     {
         SetNote(L"Pick a game from the list first.", Note::Error);
         return;
+    }
+
+    if (st_.upscale != 0 && !Running())
+    {
+        WritePictureIni(true); // output scaling always runs the upscaler on the picture
+        ReadPictureState();
     }
 
     const GameItem game = games_[selected_];
@@ -2905,6 +2933,11 @@ void App::OnClick(int id)
                 SetNote(L"Could not update OptiScaler.ini. Check the file and permissions.", Note::Error);
             }
         }
+        // the ini was just replaced: put the multi frame generation count and the picture upscaler back in
+        ApplyMfgCount();
+        if (st_.upscale != 0)
+            WritePictureIni(true);
+        ReadPictureState();
     }
     else if (id == kIdPresentSelect)
     {
@@ -2998,7 +3031,7 @@ void App::OnClick(int id)
     }
     else if (id == kIdLimitFps)
     {
-        static const int fpsList[] = { 30, 40, 45, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240 };
+        static const int fpsList[] = { 30, 40, 45, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240, 300, 360, 400, 500 };
         HMENU menu = CreatePopupMenu();
         if (menu)
         {
@@ -3013,7 +3046,7 @@ void App::OnClick(int id)
             GetCursorPos(&pt);
             const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
             DestroyMenu(menu);
-            if (cmd >= static_cast<UINT>(kLimitFpsMenuBase) && cmd < static_cast<UINT>(kLimitFpsMenuBase + 4 + 14))
+            if (cmd >= static_cast<UINT>(kLimitFpsMenuBase) && cmd < static_cast<UINT>(kLimitFpsMenuBase + 4 + static_cast<int>(sizeof(fpsList) / sizeof(fpsList[0]))))
             {
                 const int k = static_cast<int>(cmd - kLimitFpsMenuBase);
                 st_.limitFps = k == 0 ? 0 : (k <= 3 ? -(k + 1) : fpsList[k - 4]);
@@ -3039,6 +3072,22 @@ void App::OnClick(int id)
             RememberSlot(games_[selected_].exe, profileSlot_);
         SetNote(L"Profile " + std::to_wstring(profileSlot_) + L" selected. Save stores the current settings in it, Load applies it.", Note::Info);
     }
+    else if (id >= kIdMfg0 && id < kIdMfg0 + 5)
+    {
+        const int n = id - kIdMfg0 + 1;
+        if (!MfgMode(st_.frameGenMode))
+        {
+            SetNote(L"Multi frame generation count is for Intel MFG, Artur, Combo and Nvidia MFG.", Note::Info);
+        }
+        else
+        {
+            st_.mfgCount = st_.mfgCount == n ? 0 : n; // pressing the chosen one again goes back to auto
+            Save();
+            ApplyMfgCount();
+            SetNote(st_.mfgCount == 0 ? std::wstring(L"Multi frame generation: auto.")
+                                      : L"Multi frame generation: " + std::to_wstring(st_.mfgCount + 1) + L"x.", Note::Ok);
+        }
+    }
     else if (id >= kIdPreset0 && id < kIdPreset0 + 7)
     {
         if (Running())
@@ -3063,13 +3112,7 @@ void App::OnClick(int id)
     else if (id == kIdPictureOn || id == kIdPictureOff)
     {
         const bool on = id == kIdPictureOn;
-        const std::wstring iniPath = oc::ExeDir() + L"OptiScaler.ini";
-        const wchar_t* v = on ? L"true" : L"false";
-        bool ok = WritePrivateProfileStringW(L"Sharpness", L"OverrideSharpness", v, iniPath.c_str()) != 0;
-        if (on)
-            ok = WritePrivateProfileStringW(L"Sharpness", L"Sharpness", L"0.600000", iniPath.c_str()) != 0 && ok;
-        ok = WritePrivateProfileStringW(L"CAS", L"Enabled", v, iniPath.c_str()) != 0 && ok;
-        ok = WritePrivateProfileStringW(L"DlssNr", L"NativeUpscalerPass", v, iniPath.c_str()) != 0 && ok;
+        const bool ok = WritePictureIni(on);
         if (ok)
             SetNote(on ? L"Upscaler on the picture is on (sharpness 0.6, CAS, native upscaler pass). Restart the game to use the change."
                        : L"Upscaler on the picture is off. Restart the game to use the change.", Note::Ok);
@@ -3078,7 +3121,12 @@ void App::OnClick(int id)
     }
     else if (id == kIdBorderless)
     {
-        ToggleBorderless();
+        const bool isOn = selected_ >= 0 && selected_ < static_cast<int>(games_.size()) && BorderIndex(games_[selected_].hwnd) >= 0;
+        if (st_.upscale != 0 && !isOn)
+            MessageBoxW(hwnd_, L"Borderless cannot be used while Output scaling is on.\nTurn Output scaling off first, then press Borderless.",
+                        L"Output scaling is on", MB_OK | MB_ICONINFORMATION);
+        else
+            ToggleBorderless();
     }
     else if (id == kIdUpResize)
     {
@@ -3672,7 +3720,7 @@ void App::Paint(HDC dc, int W, int H)
         const bool hotB = hover_ == kIdBorderless && pick;
         FillRound(g, bb, S(8), on ? col::Alpha(col::Green(), 40) : (hotB ? col::RowHot() : col::Row()));
         StrokeRound(g, bb, S(8), on ? col::Green() : (hotB ? col::Accent() : col::Line()), max(1.0f, S(1)));
-        Text(g, on ? L"Borderless: On" : L"Borderless: Off", *f_.chip, bb, pick ? (on ? col::Green() : col::Text()) : col::Muted(), 1);
+        Text(g, on ? L"Borderless: On" : L"Borderless: Off", *f_.chip, bb, pick ? (on ? col::Green() : (st_.upscale != 0 ? col::Muted() : col::Text())) : col::Muted(), 1);
         if (pick)
             AddHit(bb, kIdBorderless);
     }
@@ -4011,6 +4059,23 @@ void App::Paint(HDC dc, int W, int H)
 
             Text(g, L"Frame Generation", *f_.bodyB,
                 R(560, 386, 230, 24), col::Text());
+
+            // multi frame generation: 2x / 3x / 4x (Intel MFG, Artur, Combo, Nvidia MFG)
+            {
+                const bool mfgOk = MfgMode(st_.frameGenMode) && !locked;
+                static const wchar_t* const mfgNames[] = { L"2x", L"3x", L"4x", L"5x", L"6x" };
+                for (int i = 0; i < 5; ++i)
+                {
+                    const gp::RectF c = R(712.0f + i * 36.0f, 388, 32, 20);
+                    const bool act = MfgMode(st_.frameGenMode) && st_.mfgCount == i + 1;
+                    const bool hot = hover_ == kIdMfg0 + i && mfgOk;
+                    FillRound(g, c, S(7), act ? col::Accent() : (hot ? col::RowHot() : col::Row()));
+                    StrokeRound(g, c, S(7), act || hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
+                    Text(g, mfgNames[i], *f_.tiny, c, act ? col::White() : (mfgOk ? col::Text() : col::Muted()), 1);
+                    if (!locked)
+                        AddHit(c, kIdMfg0 + i);
+                }
+            }
 
             const gp::RectF selector = R(560, 412, 230, 30);
             const bool selectorHot = hover_ == kIdFrameGenSelect && !locked;

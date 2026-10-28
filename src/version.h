@@ -2,5 +2,5 @@
 // One place for the version: shown in the launcher and in the file properties of both programs.
 #define OC_VER_MAJOR 2
 #define OC_VER_MINOR 10
-#define OC_VER_PATCH 6
-#define OC_VER_STR "2.10.6"
+#define OC_VER_PATCH 8
+#define OC_VER_STR "2.10.8"
