@@ -69,7 +69,7 @@ constexpr int kIdUpscalerApply = 12;
 constexpr int kIdLinkJH = 8;
 constexpr int kIdLinkApps = 9;
 constexpr int kIdLinkArchive = 10;
-constexpr int kIdLinkDonate = 44;
+constexpr int kIdLinkDonate = 50;
 constexpr int kFgMenuBase = 5000;
 constexpr int kUpscalerMenuBase = 5100;
 constexpr int kIdBoostSelect = 13;
@@ -97,7 +97,7 @@ constexpr int kIdUpResize = 32;
 constexpr int kIdUpSlider = 33;
 constexpr int kIdProfSlot0 = 34; // 34..37: profile slots 1..4
 constexpr int kIdProfileLoad = 38;
-constexpr int kIdPreset0 = 40; // 40..43: quick modes NO FG / x2 / x3 / x4
+constexpr int kIdPreset0 = 40; // 40..46: quick modes NO FG, x2 / x3 / x4 (new GPU: Intel MFG), x2 / x3 / x4 (old GPU: Artur)
 constexpr int kUpMenuBase = 5900;
 const wchar_t* const kFgNames[11] = {
     L"Intel MFG (xell/new GPU)",         // 0
@@ -1465,8 +1465,8 @@ class App
     void RestoreLimiter();
     // Quick modes: 0 NO FG, 1 x2, 2 x3, 3 x4: limiter on the refresh rate (or 1/2, 1/3, 1/4 of it, applied at START), Classic + unlimited, and
     // NO FG or Intel MFG.
-    static int PresetFg(int k) { return k == 0 ? 2 : 0; }
-    static int PresetLimit(int k) { return k == 0 ? 0 : -(k + 1); }
+    static int PresetFg(int k) { return k == 0 ? 2 : (k <= 3 ? 0 : 1); }   // NO FG, Intel MFG (new GPU), Artur (old GPU)
+    static int PresetLimit(int k) { return k == 0 ? 0 : (k <= 3 ? -(k + 1) : -(k - 2)); }
     bool PresetActive(int k) const
     {
         return st_.frameGenMode == PresetFg(k) && st_.limitFps == PresetLimit(k) && st_.limitAuto == 1 && st_.limitTarget != 0 &&
@@ -1481,7 +1481,8 @@ class App
             st_.limitTarget = 1; // the game's own profile
         st_.presentMode = 6;
         Save();
-        static const wchar_t* const names[] = { L"NO FG MOD", L"x2 FG MOD", L"x3 FG MOD", L"x4 FG MOD" };
+        static const wchar_t* const names[] = { L"NO FG MOD", L"x2 FG MOD (NEW GPU)", L"x3 FG MOD (NEW GPU)", L"x4 FG MOD (NEW GPU)",
+                                                L"x2 FG MOD (OLD GPU)", L"x3 FG MOD (OLD GPU)", L"x4 FG MOD (OLD GPU)" };
         SetNote(std::wstring(names[k]) + L": limiter, present mode and frame generation set.", Note::Ok);
         OnClick(kIdFrameGenApply); // writes OptiScaler.ini for the chosen frame generation
     }
@@ -3019,7 +3020,7 @@ void App::OnClick(int id)
             RememberSlot(games_[selected_].exe, profileSlot_);
         SetNote(L"Profile " + std::to_wstring(profileSlot_) + L" selected. Save stores the current settings in it, Load applies it.", Note::Info);
     }
-    else if (id >= kIdPreset0 && id < kIdPreset0 + 4)
+    else if (id >= kIdPreset0 && id < kIdPreset0 + 7)
     {
         if (Running())
             SetNote(L"Stop the capture first, then pick a mode.", Note::Info);
@@ -3623,11 +3624,11 @@ void App::Paint(HDC dc, int W, int H)
 
     // ---- quick modes ----
     {
-        static const wchar_t* const names[] = { L"NO FG MOD", L"x2 FG MOD", L"x3 FG MOD", L"x4 FG MOD" };
-        Text(g, L"Quick modes", *f_.sm, R(24, 76, 100, 20), col::Muted());
-        for (int k = 0; k < 4; ++k)
+        static const wchar_t* const names[] = { L"NO FG MOD", L"x2 FG \u00B7 NEW GPU", L"x3 FG \u00B7 NEW GPU", L"x4 FG \u00B7 NEW GPU",
+                                                L"x2 FG \u00B7 OLD GPU", L"x3 FG \u00B7 OLD GPU", L"x4 FG \u00B7 OLD GPU" };
+        for (int k = 0; k < 7; ++k)
         {
-            const gp::RectF chip = R(124.0f + k * 196.0f, 72, 188, 26);
+            const gp::RectF chip = R(24.0f + k * 127.0f, 72, 122, 26);
             const bool active = PresetActive(k);
             const bool hot = hover_ == kIdPreset0 + k && !locked;
             FillRound(g, chip, S(8), active ? col::Alpha(col::Accent(), 70) : (hot ? col::RowHot() : col::Row()));
