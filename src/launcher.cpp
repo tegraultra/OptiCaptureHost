@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <memory>
@@ -1462,6 +1463,9 @@ class App
     }
     void ToggleBorderless();
     void ResizeGameWindow(bool quiet = false);
+    void KeepGameSize();
+    int keepW_ = 0, keepH_ = 0, keepTries_ = 0;
+    ULONGLONG keepSince_ = 0, keepNext_ = 0;
     std::wstring osdExe_; // game whose RTSS overlay was turned off for this capture
     void SetRtssOsd(bool hide);
     void RestoreLimiter();
@@ -1968,6 +1972,8 @@ void App::Start()
     SetRtssOsd(true); // RTSS overlay off for this game while the host runs
 
     // Output scaling: make the game render small (monitor size / 1.5, 1.7 or 2) before the host starts; the host scales it up.
+    keepW_ = keepH_ = keepTries_ = 0;
+    keepSince_ = keepNext_ = 0;
     if (st_.upscale != 0)
         ResizeGameWindow(true);
 
@@ -2272,6 +2278,47 @@ void App::SetRtssOsd(bool hide)
 
 // Output scaling: the game window is made as small as the chosen level asks (monitor size / 1.5, 1.7 or 2) and put in the
 // top left corner of its monitor; the host then scales the picture back up to the whole monitor.
+// While the capture runs: if the game changed its resolution (its own settings menu), put the window back on the chosen size
+// (Quality, Balanced, Performance or Native) once the new size has been stable for a moment.
+void App::KeepGameSize()
+{
+    if (!Running() || st_.upscale == 0 || !upWnd_ || !IsWindow(upWnd_) || IsIconic(upWnd_))
+        return;
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(MonitorFromWindow(upWnd_, MONITOR_DEFAULTTONEAREST), &mi))
+        return;
+    static const double factor[] = { 1.5, 1.7, 2.0, 1.0 };
+    const double f = factor[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 3) ? st_.upscaleLevel : 1];
+    const int cw = (static_cast<int>((mi.rcMonitor.right - mi.rcMonitor.left) / f + 0.5)) & ~1;
+    const int ch = (static_cast<int>((mi.rcMonitor.bottom - mi.rcMonitor.top) / f + 0.5)) & ~1;
+    RECT cr{};
+    if (!GetClientRect(upWnd_, &cr))
+        return;
+    const int w = cr.right - cr.left, h = cr.bottom - cr.top;
+    if (std::abs(w - cw) <= 2 && std::abs(h - ch) <= 2)
+    {
+        keepW_ = keepH_ = 0;
+        keepTries_ = 0;
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (w != keepW_ || h != keepH_)
+    {
+        keepW_ = w; // a new size: wait until it stays for a moment (the game may still be changing it)
+        keepH_ = h;
+        keepSince_ = now;
+        return;
+    }
+    if (now - keepSince_ < 1500 || now < keepNext_ || keepTries_ >= 4)
+        return;
+    ++keepTries_;
+    keepNext_ = now + 4000;
+    ResizeGameWindow(true);
+    SetNote(L"The game changed its resolution (" + std::to_wstring(w) + L"x" + std::to_wstring(h) + L"): the window was set back to " +
+                std::to_wstring(cw) + L"x" + std::to_wstring(ch) + L".", Note::Info);
+}
+
 void App::ResizeGameWindow(bool quiet)
 {
     if (selected_ < 0 || selected_ >= static_cast<int>(games_.size()))
@@ -3564,6 +3611,7 @@ LRESULT App::OnMessage(UINT m, WPARAM w, LPARAM l)
         else if (w == kTimerHost)
         {
             PollHost();
+            KeepGameSize();
             // a warning that came up while the launcher was minimized: show it as soon as the window is visible again
             if (dlgKind_ < 0 && !warnQueue_.empty() && !IsIconic(hwnd_) && IsWindowVisible(hwnd_))
                 OpenNextDialog();

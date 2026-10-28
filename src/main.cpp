@@ -1910,9 +1910,9 @@ void Host::RecordUpscale(ID3D12Resource* bb, UINT idx)
     else if (fsrTemporal && st_.nisSharp > 0)
     {
         // FSR3/4's own sharpening is faint (and FSR 4 has none): the sharpness slider drives FSR 1's RCAS on FSR's picture instead.
-        // Slider 0 = no extra sharpening, 100 = twice the strength of RCAS's usual maximum (linear).
+        // Slider 0 = no extra sharpening, 100 = RCAS at its usual maximum (linear; beyond that the picture turns snowy).
         UINT r[16] = {};
-        r[0] = FloatBits(2.0f * static_cast<float>(std::clamp(st_.nisSharp, 0, 100)) / 100.0f);
+        r[0] = FloatBits(static_cast<float>(std::clamp(st_.nisSharp, 0, 100)) / 100.0f);
         list_->OMSetRenderTargets(1, &bbRtv, FALSE, nullptr);
         list_->SetPipelineState(upPsoRcas_.Get());
         list_->SetGraphicsRoot32BitConstants(0, 16, r, 0);
