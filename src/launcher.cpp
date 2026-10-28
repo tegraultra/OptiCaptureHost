@@ -93,6 +93,8 @@ constexpr int kIdProfileAuto = 30;
 constexpr int kIdUpSelect = 31;
 constexpr int kIdUpResize = 32;
 constexpr int kIdUpSlider = 33;
+constexpr int kIdProfSlot0 = 34; // 34..37: profile slots 1..4
+constexpr int kIdProfileLoad = 38;
 constexpr int kUpMenuBase = 5900;
 const wchar_t* const kProfilesDir = L"Game Profiles"; // next to the launcher: one folder per game
 constexpr int kLimitModeMenuBase = 5800;
@@ -1416,7 +1418,27 @@ class App
     int lastOffered_ = -1;
     void SaveProfile();
     bool ProfileFolder(const std::wstring& exe, std::wstring& dir) const;
-    void ApplyProfile(const std::wstring& exe);
+    void ApplyProfile(const std::wstring& exe, int slot);
+    int profileSlot_ = 1;         // 1..4: which of the game's four saved profiles Save / Load use
+    int profileApplySlot_ = 1;    // the slot the "apply?" question is about
+    static std::wstring SlotFile(int slot)
+    {
+        return slot <= 1 ? std::wstring(L"OptiScaler.ini") : L"OptiScaler.slot" + std::to_wstring(slot) + L".ini";
+    }
+    bool SlotExists(const std::wstring& exe, int slot) const
+    {
+        std::wstring dir;
+        return ProfileFolder(exe, dir) && GetFileAttributesW((dir + L"\\" + SlotFile(slot)).c_str()) != INVALID_FILE_ATTRIBUTES;
+    }
+    int LastSlot(const std::wstring& exe) const
+    {
+        const int v = GetPrivateProfileIntW(L"ProfileSlot", exe.c_str(), 1, oc::SettingsPath().c_str());
+        return v >= 1 && v <= 4 ? v : 1;
+    }
+    void RememberSlot(const std::wstring& exe, int slot) const
+    {
+        WritePrivateProfileStringW(L"ProfileSlot", exe.c_str(), std::to_wstring(slot).c_str(), oc::SettingsPath().c_str());
+    }
     void OfferProfile();
     bool pictureOn_ = false; // [CAS] Enabled in OptiScaler.ini
     void ReadPictureState()
@@ -2169,24 +2191,26 @@ void App::SaveProfile()
     }
     CreateDirectoryW((oc::ExeDir() + kProfilesDir).c_str(), nullptr);
     CreateDirectoryW(dir.c_str(), nullptr);
-    if (!CopyFileW(src.c_str(), (dir + L"\\OptiScaler.ini").c_str(), FALSE))
+    if (!CopyFileW(src.c_str(), (dir + L"\\" + SlotFile(profileSlot_)).c_str(), FALSE))
     {
         SetNote(L"Could not save the profile. Check the folder permissions.", Note::Error);
         return;
     }
-    SetNote(L"Profile saved for " + exe + L" (" + kProfilesDir + L"\\" + dir.substr(dir.find_last_of(L'\\') + 1) + L").", Note::Ok);
+    RememberSlot(exe, profileSlot_);
+    SetNote(L"Profile " + std::to_wstring(profileSlot_) + L" saved for " + exe + L" (" + kProfilesDir + L"\\" +
+                dir.substr(dir.find_last_of(L'\\') + 1) + L").", Note::Ok);
 }
 
 // Puts the saved OptiScaler.ini of a game back next to the launcher.
-void App::ApplyProfile(const std::wstring& exe)
+void App::ApplyProfile(const std::wstring& exe, int slot)
 {
     std::wstring dir;
     if (!ProfileFolder(exe, dir))
         return;
-    const std::wstring src = dir + L"\\OptiScaler.ini";
+    const std::wstring src = dir + L"\\" + SlotFile(slot);
     if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES)
     {
-        SetNote(L"The saved profile of " + exe + L" has no OptiScaler.ini.", Note::Error);
+        SetNote(L"Profile " + std::to_wstring(slot) + L" of " + exe + L" is empty. Press Save to store the current settings in it.", Note::Info);
         return;
     }
     if (!CopyFileW(src.c_str(), (oc::ExeDir() + L"OptiScaler.ini").c_str(), FALSE))
@@ -2195,7 +2219,9 @@ void App::ApplyProfile(const std::wstring& exe)
         return;
     }
     ReadPictureState();
-    SetNote(L"Saved profile of " + exe + L" applied (OptiScaler.ini replaced).", Note::Ok);
+    profileSlot_ = slot;
+    RememberSlot(exe, slot);
+    SetNote(L"Profile " + std::to_wstring(slot) + L" of " + exe + L" applied (OptiScaler.ini replaced).", Note::Ok);
 }
 
 // A game was picked in the list: if it has a saved profile, apply it (auto mode) or ask.
@@ -2205,17 +2231,28 @@ void App::OfferProfile()
         return;
     lastOffered_ = selected_;
     const std::wstring exe = games_[selected_].exe;
-    std::wstring dir;
-    if (!ProfileFolder(exe, dir) || GetFileAttributesW((dir + L"\\OptiScaler.ini").c_str()) == INVALID_FILE_ATTRIBUTES)
-        return;
+    int slot = LastSlot(exe);
+    profileSlot_ = slot;
+    if (!SlotExists(exe, slot))
+    {
+        slot = 0;
+        for (int i = 1; i <= 4 && !slot; ++i)
+            if (SlotExists(exe, i))
+                slot = i;
+        if (!slot)
+            return;
+        profileSlot_ = slot;
+    }
     if (st_.profileAuto)
     {
-        ApplyProfile(exe);
+        ApplyProfile(exe, slot);
         return;
     }
     profileExe_ = exe;
-    warnText_[kWarnProfile] = L"You saved settings for " + exe + L" earlier.\n\nDo you want to apply them now? This replaces the "
-                              L"OptiScaler.ini next to the launcher with the one saved for this game.";
+    profileApplySlot_ = slot;
+    warnText_[kWarnProfile] = L"You saved settings (profile " + std::to_wstring(slot) + L") for " + exe +
+                              L" earlier.\n\nDo you want to apply them now? This replaces the OptiScaler.ini next to the launcher "
+                              L"with the one saved for this game.";
     dlgKind_ = kWarnProfile;
     dlgProfile_ = true;
     dlgDontShow_ = false;
@@ -2240,7 +2277,7 @@ void App::CloseDialog(bool accepted)
                 st_.profileAuto = 1;
                 Save();
             }
-            ApplyProfile(profileExe_);
+            ApplyProfile(profileExe_, profileApplySlot_);
         }
         Invalidate();
         return;
@@ -2879,6 +2916,20 @@ void App::OnClick(int id)
     else if (id == kIdProfileSave)
     {
         SaveProfile();
+    }
+    else if (id >= kIdProfSlot0 && id < kIdProfSlot0 + 4)
+    {
+        profileSlot_ = id - kIdProfSlot0 + 1;
+        if (selected_ >= 0 && selected_ < static_cast<int>(games_.size()))
+            RememberSlot(games_[selected_].exe, profileSlot_);
+        SetNote(L"Profile " + std::to_wstring(profileSlot_) + L" selected. Save stores the current settings in it, Load applies it.", Note::Info);
+    }
+    else if (id == kIdProfileLoad)
+    {
+        if (selected_ >= 0 && selected_ < static_cast<int>(games_.size()))
+            ApplyProfile(games_[selected_].exe, profileSlot_);
+        else
+            SetNote(L"Pick a game in the list first.", Note::Error);
     }
     else if (id == kIdProfileAuto)
     {
@@ -3672,25 +3723,46 @@ void App::Paint(HDC dc, int W, int H)
         }
     }
 
-    // ---- game profile: save button + automatic apply ----
+    // ---- game profiles: 4 slots per game, Save, Load, automatic apply ----
     {
         const bool pick = selected_ >= 0 && selected_ < static_cast<int>(games_.size());
-        const gp::RectF sb = R(44, 770, 190, 28);
+        for (int i = 1; i <= 4; ++i)
+        {
+            const gp::RectF sl = R(44.0f + (i - 1) * 40.0f, 770, 34, 28);
+            const bool cur = profileSlot_ == i;
+            const bool has = pick && SlotExists(games_[selected_].exe, i);
+            const bool hot = hover_ == kIdProfSlot0 + i - 1 && pick;
+            FillRound(g, sl, S(8), cur ? col::Accent() : (hot ? col::RowHot() : col::Row()));
+            StrokeRound(g, sl, S(8), has ? col::Green() : (hot ? col::Accent() : col::Line()), max(1.0f, S(has ? 2 : 1)));
+            Text(g, std::to_wstring(i), *f_.chip, sl, cur ? col::White() : (pick ? col::Text() : col::Muted()), 1);
+            if (pick)
+                AddHit(sl, kIdProfSlot0 + i - 1);
+        }
+
+        const gp::RectF sb = R(210, 770, 62, 28);
         const bool hotS = hover_ == kIdProfileSave && pick;
         FillRound(g, sb, S(8), hotS ? col::Accent2() : col::Accent());
         StrokeRound(g, sb, S(8), col::Line(), max(1.0f, S(1)));
-        Text(g, L"Save game profile", *f_.chip, sb, pick ? col::White() : col::Muted(), 1);
+        Text(g, L"Save", *f_.chip, sb, pick ? col::White() : col::Muted(), 1);
         if (pick)
             AddHit(sb, kIdProfileSave);
 
-        const gp::RectF box = R(252, 775, 18, 18);
+        const gp::RectF lb = R(278, 770, 62, 28);
+        const bool hotL = hover_ == kIdProfileLoad && pick;
+        FillRound(g, lb, S(8), hotL ? col::RowHot() : col::Row());
+        StrokeRound(g, lb, S(8), hotL ? col::Accent() : col::Line(), max(1.0f, S(1)));
+        Text(g, L"Load", *f_.chip, lb, pick ? col::Text() : col::Muted(), 1);
+        if (pick)
+            AddHit(lb, kIdProfileLoad);
+
+        const gp::RectF box = R(354, 775, 18, 18);
         const bool hotA = hover_ == kIdProfileAuto;
         FillRound(g, box, S(5), st_.profileAuto ? col::Accent() : col::Row());
         StrokeRound(g, box, S(5), hotA ? col::Accent2() : col::Line(), max(1.0f, S(1)));
         if (st_.profileAuto)
             Text(g, L"\u2713", *f_.chip, box, col::White(), 1);
-        Text(g, L"Apply saved profiles automatically", *f_.sm, R(276, 773, 240, 22), col::Text());
-        AddHit(R(250, 770, 270, 28), kIdProfileAuto);
+        Text(g, L"Auto apply", *f_.sm, R(378, 773, 130, 22), col::Text());
+        AddHit(R(352, 770, 156, 28), kIdProfileAuto);
     }
 
     // ---- VSync card ----
