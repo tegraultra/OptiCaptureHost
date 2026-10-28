@@ -3151,7 +3151,7 @@ void App::OnClick(int id)
         }
         static const wchar_t* lvName[] = { L"Quality  (1.5x", L"Balanced  (1.7x", L"Performance  (2x" };
         static const double lvF[] = { 1.5, 1.7, 2.0 };
-        static const int methods[] = { 2, 3, 1, 4 }; // FSR 1, NIS, bilinear, FSR3/4 (needs amd_fidelityfx_dx12.dll)
+        static const int methods[] = { 2, 3, 1, 4 }; // FSR 1, NIS, bilinear, FSR temporal (needs amd_fidelityfx_dx12.dll)
         static const wchar_t* mName[] = { L"FSR 1", L"NIS", L"Bilinear", L"FSR3/4" };
         HMENU menu = CreatePopupMenu();
         if (menu)

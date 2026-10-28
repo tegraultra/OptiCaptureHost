@@ -1435,7 +1435,7 @@ bool Host::InitUpscale()
     return true;
 }
 
-// Temporal FSR: the two compute passes that measure motion (fsr_flow_shader.h).
+// FSR3/4: the two compute passes that measure motion (fsr_flow_shader.h).
 bool Host::InitFsrPipelines()
 {
     fsrRoot_.Reset();
@@ -1464,7 +1464,7 @@ bool Host::InitFsrPipelines()
     if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
         FAILED(dev12_->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&fsrRoot_))))
     {
-        Log("Temporal FSR: root signature failed");
+        Log("FSR3/4: root signature failed");
         return false;
     }
     auto make = [&](const char* entry, ComPtr<ID3D12PipelineState>& pso) {
@@ -1473,7 +1473,7 @@ bool Host::InitFsrPipelines()
                                      D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &cs, &e);
         if (FAILED(h))
         {
-            Log("Temporal FSR: shader %s failed: 0x%08X %s", entry, static_cast<unsigned>(h),
+            Log("FSR3/4: shader %s failed: 0x%08X %s", entry, static_cast<unsigned>(h),
                 e ? static_cast<const char*>(e->GetBufferPointer()) : "");
             return false;
         }
@@ -1482,7 +1482,7 @@ bool Host::InitFsrPipelines()
         pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
         const HRESULT h2 = dev12_->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso));
         if (FAILED(h2))
-            Log("Temporal FSR: pipeline %s failed: 0x%08X", entry, static_cast<unsigned>(h2));
+            Log("FSR3/4: pipeline %s failed: 0x%08X", entry, static_cast<unsigned>(h2));
         return SUCCEEDED(h2);
     };
     return make("CSBlock", fsrBlockPso_) && make("CSPixel", fsrPixelPso_);
@@ -1537,20 +1537,20 @@ bool Host::InitFsrTemporal()
                 HMODULE m = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
                 if (!m)
                 {
-                    Log("Temporal FSR: %ls could not be loaded (error %lu)", path.c_str(), GetLastError());
+                    Log("FSR3/4: %ls could not be loaded (error %lu)", path.c_str(), GetLastError());
                     continue;
                 }
                 ffxFunctions fn{};
                 ffxLoadFunctions(&fn, m);
                 if (!fn.CreateContext || !fn.DestroyContext || !fn.Dispatch)
                 {
-                    Log("Temporal FSR: %ls has no FidelityFX API", path.c_str());
+                    Log("FSR3/4: %ls has no FidelityFX API", path.c_str());
                     FreeLibrary(m);
                     continue;
                 }
                 ffxModule_ = m;
                 ffxFn_ = fn;
-                Log("Temporal FSR: runtime %ls", path.c_str());
+                Log("FSR3/4: runtime %ls", path.c_str());
                 break;
             }
             if (ffxModule_)
@@ -1558,7 +1558,7 @@ bool Host::InitFsrTemporal()
         }
         if (!ffxModule_)
         {
-            Log("Temporal FSR: amd_fidelityfx_dx12.dll was not found next to the program (or in an \"fsr\" / \"FSR 4\" folder)");
+            Log("FSR3/4: amd_fidelityfx_dx12.dll was not found next to the program (or in an \"fsr\" / \"FSR 4\" folder)");
             return false;
         }
     }
@@ -1587,7 +1587,7 @@ bool Host::InitFsrTemporal()
         !make(fsrOut_, outW_, outH_, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE))
     {
-        Log("Temporal FSR: textures could not be made");
+        Log("FSR3/4: textures could not be made");
         ReleaseFsrTemporal();
         return false;
     }
@@ -1643,7 +1643,7 @@ bool Host::InitFsrTemporal()
     if (rc != FFX_API_RETURN_OK || !ffxCtx_)
     {
         ffxCtx_ = nullptr;
-        Log("Temporal FSR: AMD's runtime could not make its upscaling context (code %u)", static_cast<unsigned>(rc));
+        Log("FSR3/4: AMD's runtime could not make its upscaling context (code %u)", static_cast<unsigned>(rc));
         ReleaseFsrTemporal();
         return false;
     }
@@ -1652,13 +1652,13 @@ bool Host::InitFsrTemporal()
         ffxQueryGetProviderVersion used{};
         used.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
         if (ffxFn_.Query(&ffxCtx_, &used.header) == FFX_API_RETURN_OK && used.versionName)
-            Log("Temporal FSR: the runtime runs %s", used.versionName);
+            Log("FSR3/4: the runtime runs %s", used.versionName);
     }
     fsrReady_ = true;
     fsrHavePrev_ = false;
     fsrCur_ = 1;
     fsrLast_ = std::chrono::steady_clock::now();
-    Log("Temporal FSR: %ux%u -> %ux%u", width_, height_, outW_, outH_);
+    Log("FSR3/4: %ux%u -> %ux%u", width_, height_, outW_, outH_);
     return true;
 }
 
@@ -1712,8 +1712,11 @@ void Host::RecordFsrTemporal()
     const auto now = std::chrono::steady_clock::now();
     float frameMs = static_cast<float>(std::chrono::duration<double, std::milli>(now - fsrLast_).count());
     fsrLast_ = now;
+    // Blend with DWM capture timestamp delta to smooth out CPU scheduling jitter for Frame Generation:
+    if (!srcGaps_.empty() && srcGaps_.back() >= 2.0 && srcGaps_.back() <= 100.0)
+        frameMs = static_cast<float>(0.7 * srcGaps_.back() + 0.3 * frameMs);
     if (frameMs < 1.0f || frameMs > 250.0f)
-        frameMs = 16.6f;
+        frameMs = 16.666f;
 
     barrier(fsrOut_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     ffxDispatchDescUpscale d{};
@@ -1724,7 +1727,7 @@ void Host::RecordFsrTemporal()
     d.motionVectors = ffxApiGetResourceDX12(fsrMv_.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.output = ffxApiGetResourceDX12(fsrOut_.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     d.jitterOffset = { 0.0f, 0.0f };
-    d.motionVectorScale = { 1.0f, -1.0f }; // vectors in the captured picture's pixels
+    d.motionVectorScale = { 1.0f, -1.0f }; // sub-pixel vectors with inverted Y for DX12 / OptiScaler FG
     d.renderSize = { width_, height_ };
     d.upscaleSize = { outW_, outH_ };
     d.enableSharpening = st_.nisSharp > 0;
@@ -1734,15 +1737,15 @@ void Host::RecordFsrTemporal()
     d.reset = !fsrHavePrev_;
     d.cameraNear = 0.1f;
     d.cameraFar = 1000.0f;
-    d.cameraFovAngleVertical = 1.0f;
-    d.viewSpaceToMetersFactor = 1.0f; // the depth is flat anyway
+    d.cameraFovAngleVertical = 1.04719755f; // 60 degrees in radians
+    d.viewSpaceToMetersFactor = 1.0f;
     d.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
     const ffxReturnCode_t rc = ffxFn_.Dispatch(&ffxCtx_, &d.header);
     if (rc != FFX_API_RETURN_OK)
     {
         static int logged = 0;
         if (logged++ < 5)
-            Log("Temporal FSR: dispatch failed (code %u)", static_cast<unsigned>(rc));
+            Log("FSR3/4: dispatch failed (code %u)", static_cast<unsigned>(rc));
     }
     barrier(fsrOut_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     fsrHavePrev_ = true;
@@ -1761,7 +1764,7 @@ bool Host::CreateUpscaleViews()
     dev12_->CreateShaderResourceView(shared12_.Get(), &sv, upSrvHeap_->GetCPUDescriptorHandleForHeapStart());
     if (upMethod_ == 4 && !InitFsrTemporal())
     {
-        Log("Output scaling: temporal FSR is not available, using FSR 1 instead");
+        Log("Output scaling: FSR3/4 is not available, using FSR 1 instead");
         upMethod_ = 2;
     }
     return true;
