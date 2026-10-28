@@ -1472,7 +1472,7 @@ class App
     bool PresetActive(int k) const
     {
         return st_.frameGenMode == PresetFg(k) && st_.mfgCount == PresetMfg(k) && st_.limitFps == PresetLimit(k) && st_.limitAuto == 1 && st_.limitTarget != 0 &&
-               st_.presentMode == 6 && (k <= 3 || (st_.upscale == 4 && st_.upscaleLevel == 0));
+               st_.presentMode == 6 && (k <= 3 || (st_.upscale == 3 && st_.upscaleLevel == 0));
     }
     void ApplyPreset(int k)
     {
@@ -1485,8 +1485,8 @@ class App
         st_.presentMode = 6;
         if (k >= 4)
         {
-            // OLD GPU modes: Output scaling with FSR 4/3 on Quality (the game window is made smaller at START)
-            st_.upscale = 4;
+            // OLD GPU modes: Output scaling with NIS on Quality (the game window is made smaller at START)
+            st_.upscale = 3;
             st_.upscaleLevel = 0;
         }
         Save();
@@ -1904,6 +1904,12 @@ void App::Start()
         return;
     }
 
+    if (st_.upscale != 0 && !Running())
+    {
+        WritePictureIni(true); // output scaling always runs the upscaler on the picture
+        ReadPictureState();
+    }
+
     const GameItem game = games_[selected_];
     if (!IsWindow(game.hwnd))
     {
@@ -2269,8 +2275,8 @@ void App::ResizeGameWindow(bool quiet)
     mi.cbSize = sizeof(mi);
     if (!GetMonitorInfoW(MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST), &mi))
         return;
-    static const double factor[] = { 1.5, 1.7, 2.0, 1.0 };
-    const double f = factor[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 3) ? st_.upscaleLevel : 0];
+    static const double factor[] = { 1.5, 1.7, 2.0 };
+    const double f = factor[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 2) ? st_.upscaleLevel : 1];
     const int mw = mi.rcMonitor.right - mi.rcMonitor.left;
     const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
     const int cw = (static_cast<int>(mw / f + 0.5)) & ~1;
@@ -2927,10 +2933,13 @@ void App::OnClick(int id)
                 SetNote(L"Could not update OptiScaler.ini. Check the file and permissions.", Note::Error);
             }
         }
-        // the ini was just replaced: the chosen upscaler, and the multi frame generation count go back in
+        // the ini was just replaced: the chosen upscaler, the multi frame generation count and the picture upscaler go back in
         if (st_.frameGenMode >= 0 && st_.frameGenMode <= 10 && st_.frameGenMode != 3)
             OnClick(kIdUpscalerApply);
         ApplyMfgCount();
+        if (st_.upscale != 0)
+            WritePictureIni(true);
+        ReadPictureState();
     }
     else if (id == kIdPresentSelect)
     {
@@ -3102,12 +3111,22 @@ void App::OnClick(int id)
         SetNote(st_.profileAuto ? L"Saved game profiles will be applied automatically when you pick the game."
                                 : L"You will be asked before a saved game profile is applied.", Note::Ok);
     }
+    else if (id == kIdPictureOn || id == kIdPictureOff)
+    {
+        const bool on = id == kIdPictureOn;
+        const bool ok = WritePictureIni(on);
+        if (ok)
+            SetNote(on ? L"Upscaler on the picture is on (sharpness 0.6, CAS, native upscaler pass). Restart the game to use the change."
+                       : L"Upscaler on the picture is off. Restart the game to use the change.", Note::Ok);
+        else
+            SetNote(L"Could not update OptiScaler.ini. Check the file and permissions.", Note::Error);
+    }
     else if (id == kIdBorderless)
     {
         const bool isOn = selected_ >= 0 && selected_ < static_cast<int>(games_.size()) && BorderIndex(games_[selected_].hwnd) >= 0;
         if (st_.upscale != 0 && !isOn)
-            MessageBoxW(hwnd_, L"Borderless is not used with Output scaling (it is always on).\nThe launcher sets the game window size itself: use Resize or START.",
-                        L"Output scaling", MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(hwnd_, L"Borderless cannot be used while Output scaling is on.\nTurn Output scaling off first, then press Borderless.",
+                        L"Output scaling is on", MB_OK | MB_ICONINFORMATION);
         else
             ToggleBorderless();
     }
@@ -3130,34 +3149,45 @@ void App::OnClick(int id)
                 mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
             }
         }
-        // Output scaling is always on (FSR 4/3): Native AA keeps the size (anti-aliasing only), the others render smaller and scale up
-        static const wchar_t* lvName[] = { L"Quality  (1.5x", L"Balanced  (1.7x", L"Performance  (2x", L"Native AA  (1x" };
-        static const double lvF[] = { 1.5, 1.7, 2.0, 1.0 };
-        static const int order[] = { 3, 0, 1, 2 };
+        static const wchar_t* lvName[] = { L"Quality  (1.5x", L"Balanced  (1.7x", L"Performance  (2x" };
+        static const double lvF[] = { 1.5, 1.7, 2.0 };
+        static const int methods[] = { 2, 3, 1, 4 }; // FSR 1, NIS, bilinear, FSR temporal (needs amd_fidelityfx_dx12.dll)
+        static const wchar_t* mName[] = { L"FSR 1", L"NIS", L"Bilinear", L"FSR temporal" };
         HMENU menu = CreatePopupMenu();
         if (menu)
         {
-            for (int i = 0; i < 4; ++i)
-            {
-                const int l = order[i];
-                const int cw = (static_cast<int>(mw / lvF[l] + 0.5)) & ~1;
-                const int ch = (static_cast<int>(mh / lvF[l] + 0.5)) & ~1;
-                std::wstring t = std::wstring(L"FSR 4/3  \u00B7  ") + lvName[l] + L", " + std::to_wstring(cw) + L"x" +
-                                 std::to_wstring(ch) + L" \u2192 " + std::to_wstring(mw) + L"x" + std::to_wstring(mh) + L")";
-                AppendMenuW(menu, MF_STRING | (st_.upscaleLevel == l ? MF_CHECKED : 0), kUpMenuBase + 1 + i, t.c_str());
-            }
+            AppendMenuW(menu, MF_STRING | (st_.upscale == 0 ? MF_CHECKED : 0), kUpMenuBase, L"Off");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            for (int m = 0; m < 4; ++m)
+                for (int l = 0; l < 3; ++l)
+                {
+                    const int cw = (static_cast<int>(mw / lvF[l] + 0.5)) & ~1;
+                    const int ch = (static_cast<int>(mh / lvF[l] + 0.5)) & ~1;
+                    std::wstring t = std::wstring(mName[m]) + L"  \u00B7  " + lvName[l] + L", " + std::to_wstring(cw) + L"x" +
+                                     std::to_wstring(ch) + L" \u2192 " + std::to_wstring(mw) + L"x" + std::to_wstring(mh) + L")";
+                    AppendMenuW(menu, MF_STRING | ((st_.upscale == methods[m] && st_.upscaleLevel == l) ? MF_CHECKED : 0),
+                                kUpMenuBase + 1 + m * 3 + l, t.c_str());
+                }
             POINT pt{};
             GetCursorPos(&pt);
             const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
             DestroyMenu(menu);
-            if (cmd > static_cast<UINT>(kUpMenuBase) && cmd <= static_cast<UINT>(kUpMenuBase + 4))
+            if (cmd == static_cast<UINT>(kUpMenuBase))
+            {
+                st_.upscale = 0;
+                Save();
+                SetNote(L"Output scaling is off.", Note::Ok);
+            }
+            else if (cmd > static_cast<UINT>(kUpMenuBase) && cmd <= static_cast<UINT>(kUpMenuBase + 12))
             {
                 const int k = static_cast<int>(cmd) - kUpMenuBase - 1;
-                st_.upscale = 4;
-                st_.upscaleLevel = order[k];
+                st_.upscale = methods[k / 3];
+                st_.upscaleLevel = k % 3;
                 Save();
-                SetNote(st_.upscaleLevel == 3 ? L"Native AA: the game keeps its size and FSR only smooths the picture."
-                                              : L"START makes the game window that small and scales it up.", Note::Info);
+                OnClick(kIdPictureOn); // the upscaler on the picture goes on with it
+                ReadPictureState();
+                SetNote(L"START makes the game window that small and scales it up. \"Run the upscaler on the picture\" was turned on too.",
+                        Note::Info);
             }
         }
     }
@@ -3835,7 +3865,7 @@ void App::Paint(HDC dc, int W, int H)
 
     // ---- output scaling ----
     {
-        static const wchar_t* lvN[] = { L"Quality", L"Balanced", L"Performance", L"Native AA" };
+        static const wchar_t* lvN[] = { L"Quality", L"Balanced", L"Performance" };
         Text(g, L"Output scaling", *f_.bodyB, R(44, 738, 130, 24), col::Text());
 
         const gp::RectF selector = R(176, 734, 232, 32);
@@ -3844,8 +3874,8 @@ void App::Paint(HDC dc, int W, int H)
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
         std::wstring t = L"Off";
         if (st_.upscale != 0)
-            t = std::wstring(L"FSR 4/3  \u00B7  ") +
-                lvN[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 3) ? st_.upscaleLevel : 0];
+            t = std::wstring(st_.upscale == 2 ? L"FSR 1  \u00B7  " : (st_.upscale == 3 ? L"NIS  \u00B7  " : (st_.upscale == 4 ? L"FSR temporal  \u00B7  " : L"Bilinear  \u00B7  "))) +
+                lvN[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 2) ? st_.upscaleLevel : 1];
         Text(g, t, *f_.chip, R(186, 740, 212, 22), col::Text());
         AddHit(selector, kIdUpSelect);
 
@@ -4011,16 +4041,16 @@ void App::Paint(HDC dc, int W, int H)
 
     // ---- shortcuts card ----
     {
-        const gp::RectF c = R(540, 380, 372, 376);
+        const gp::RectF c = R(540, 380, 372, 432);
         Card(g, c);
-        Text(g, L"Shortcuts", *f_.h2, R(560, 520, 200, 24), col::Text());
+        Text(g, L"Shortcuts", *f_.h2, R(560, 576, 200, 24), col::Text());
 
-        const gp::RectF reset = R(812, 520, 80, 24);
+        const gp::RectF reset = R(812, 576, 80, 24);
         Text(g, L"Reset all", hover_ == kIdReset ? *f_.link : *f_.linkN, reset, hover_ == kIdReset ? col::Accent2() : col::Muted(), 2);
         AddHit(reset, kIdReset);
 
         // brings back the warnings that were hidden with "Don't show this warning again"
-        const gp::RectF warnReset = R(640, 520, 170, 24);
+        const gp::RectF warnReset = R(640, 576, 170, 24);
         Text(g, L"Show warnings again", hover_ == kIdWarnReset ? *f_.link : *f_.linkN, warnReset,
              hover_ == kIdWarnReset ? col::Accent2() : col::Muted(), 2);
         AddHit(warnReset, kIdWarnReset);
@@ -4102,7 +4132,30 @@ void App::Paint(HDC dc, int W, int H)
                 AddHit(apply, kIdUpscalerApply);
         }
 
-        float y = 546.0f;
+        // ---- "Run the upscaler on the picture" (sharpening + CAS + native upscaler pass) ----
+        {
+            Text(g, L"Run the upscaler on the picture", *f_.bodyB, R(560, 508, 330, 24), col::Text());
+
+            const gp::RectF onB = R(560, 534, 110, 30);
+            const bool hotOn = hover_ == kIdPictureOn && !locked;
+            FillRound(g, onB, S(8), hotOn ? col::Accent2() : col::Accent());
+            StrokeRound(g, onB, S(8), col::Line(), max(1.0f, S(1)));
+            Text(g, L"Apply", *f_.chip, onB, col::White(), 1);
+            if (!locked)
+                AddHit(onB, kIdPictureOn);
+
+            const gp::RectF offB = R(678, 534, 110, 30);
+            const bool hotOff = hover_ == kIdPictureOff && !locked;
+            FillRound(g, offB, S(8), hotOff ? col::RowHot() : col::Row());
+            StrokeRound(g, offB, S(8), hotOff ? col::Accent() : col::Line(), max(1.0f, S(1)));
+            Text(g, L"Off", *f_.chip, offB, col::Text(), 1);
+            if (!locked)
+                AddHit(offB, kIdPictureOff);
+
+            Text(g, pictureOn_ ? L"On" : L"Off", *f_.bodyB, R(800, 538, 92, 22), pictureOn_ ? col::Green() : col::Muted(), 2);
+        }
+
+        float y = 602.0f;
         for (int i = 0; i < kScCount; ++i, y += 30.0f)
         {
             if (i > 0)
