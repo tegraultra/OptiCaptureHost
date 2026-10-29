@@ -15,26 +15,37 @@ jobs:
       - uses: actions/checkout@v4
 
       # NVIDIA's DLSS SDK (headers + static library), from NVIDIA's own public repository, pinned to one commit.
-      # git (with LFS) is used so it works whether or not the files are stored in LFS. If this step fails the host is built without DLSS.
+      # If this step fails the host is built without DLSS (the host's log then says so).
       - name: Fetch NVIDIA DLSS SDK
         shell: pwsh
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $c = '374959484e79a640feaba44c93ac8cfb0a03f5b5'
-          git lfs install --skip-repo
-          git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/DLSS.git nvdlss
-          if ($LASTEXITCODE -ne 0) { Write-Host "::warning::could not clone NVIDIA/DLSS"; exit 1 }
-          Push-Location nvdlss
-          git checkout $c -- include lib/Windows_x86_64/x64
-          if ($LASTEXITCODE -ne 0) { Write-Host "::warning::could not check out the DLSS SDK files"; exit 1 }
-          Pop-Location
           New-Item -ItemType Directory -Force third_party/ngx/include, third_party/ngx/lib | Out-Null
-          Copy-Item nvdlss/include/nvsdk_ngx*.h third_party/ngx/include/
-          Copy-Item nvdlss/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib third_party/ngx/lib/
-          Get-ChildItem -Recurse third_party/ngx | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
-          if ((Get-Item third_party/ngx/lib/nvsdk_ngx_s.lib).Length -lt 100000) {
-            Write-Host "::warning::nvsdk_ngx_s.lib is too small (an LFS pointer?)"
-            Remove-Item -Recurse -Force third_party/ngx
+          $files = @{
+            'include/nvsdk_ngx.h' = 'include'; 'include/nvsdk_ngx_defs.h' = 'include'; 'include/nvsdk_ngx_defs_dlssd.h' = 'include'
+            'include/nvsdk_ngx_helpers.h' = 'include'; 'include/nvsdk_ngx_helpers_dlssd.h' = 'include'; 'include/nvsdk_ngx_params.h' = 'include'
+            'lib/Windows_x86_64/x64/nvsdk_ngx_s.lib' = 'lib'
+          }
+          $hdr = @{ Accept = 'application/vnd.github.raw'; Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'opticapturehost-ci' }
+          foreach ($f in $files.Keys) {
+            $out = "third_party/ngx/$($files[$f])/$(Split-Path $f -Leaf)"
+            try {
+              Invoke-WebRequest "https://api.github.com/repos/NVIDIA/DLSS/contents/$($f)?ref=$c" -Headers $hdr -OutFile $out
+            } catch { Write-Host "::warning::contents API failed for $f : $_" }
+            # a Git LFS pointer instead of the file: take the real one from the LFS media server
+            $isPointer = (Test-Path $out) -and ((Get-Item $out).Length -lt 400) -and ((Get-Content $out -TotalCount 1) -like 'version https://git-lfs*')
+            if (-not (Test-Path $out) -or $isPointer) {
+              try { Invoke-WebRequest "https://media.githubusercontent.com/media/NVIDIA/DLSS/$c/$f" -OutFile $out }
+              catch { Write-Host "::warning::could not fetch $f : $_" }
+            }
+          }
+          Get-ChildItem -Recurse third_party/ngx -File | ForEach-Object { Write-Host "$($_.FullName)  $($_.Length)" }
+          if (-not (Test-Path third_party/ngx/lib/nvsdk_ngx_s.lib) -or (Get-Item third_party/ngx/lib/nvsdk_ngx_s.lib).Length -lt 100000 -or -not (Test-Path third_party/ngx/include/nvsdk_ngx.h)) {
+            Write-Host "::warning::DLSS SDK files are missing or invalid; building without DLSS"
+            Remove-Item -Recurse -Force third_party/ngx -ErrorAction SilentlyContinue
             exit 1
           }
 
