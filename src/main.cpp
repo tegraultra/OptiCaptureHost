@@ -66,6 +66,11 @@
 #include "ffx_api/ffx_upscale.h"
 #include "ffx_api/ffx_api_loader.h"
 #include "ffx_api/dx12/ffx_api_dx12.h"
+#ifdef OC_HAVE_NGX
+#include "nvsdk_ngx.h"
+#include "nvsdk_ngx_defs.h"
+#include "nvsdk_ngx_params.h"
+#endif
 
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "winmm.lib")
@@ -508,6 +513,10 @@ class Host
     bool InitFsrTemporal();
     void ReleaseFsrTemporal();
     void RecordFsrTemporal();
+    bool InitDlss();
+    void ReleaseDlssFeature();
+    void ShutdownDlss();
+    bool RecordDlss(ID3D12Resource* curTex, bool reset);
     void RecordUpscale(ID3D12Resource* bb, UINT idx);
     void OverlayPlace(const RECT& game, int& x, int& y);
     bool CreateShared();
@@ -555,6 +564,10 @@ class Host
     ComPtr<ID3D12Resource> nisOut_, nisCoef_[2], nisUpload_;
     bool nisCoefDone_ = false;
     // Temporal FSR (Upscale method 4): motion measured from the captured frames, AMD's FidelityFX runtime does the upscaling.
+    // DLSS (NVIDIA NGX): runs on the same motion / depth / mask textures as FSR3/4
+    void* ngxParams_ = nullptr;  // NVSDK_NGX_Parameter*
+    void* ngxFeature_ = nullptr; // NVSDK_NGX_Handle*
+    bool ngxInit_ = false;
     HMODULE ffxModule_ = nullptr;
     ffxFunctions ffxFn_{};
     ffxContext ffxCtx_ = nullptr;
@@ -892,8 +905,8 @@ bool Host::InitOverlayAndSwapChain()
         }
         if (upOn_)
         {
-            Log("Output scaling: %s, %ux%u -> %ux%u (sharpness %.2f)", st_.upscale == 1 ? "bilinear" : (st_.upscale == 3 ? "NIS" : (st_.upscale == 4 ? "FSR3/4" : "FSR 1")), width_, height_,
-                outW_, outH_, ((st_.upscale == 3 || st_.upscale == 4) ? st_.nisSharp : st_.upscaleSharp) / 100.0);
+            Log("Output scaling: %s, %ux%u -> %ux%u (sharpness %.2f)", st_.upscale == 1 ? "bilinear" : (st_.upscale == 3 ? "NIS" : (st_.upscale == 4 ? "FSR3/4" : (st_.upscale == 5 ? "DLSS" : "FSR 1"))), width_, height_,
+                outW_, outH_, ((st_.upscale >= 3) ? st_.nisSharp : st_.upscaleSharp) / 100.0);
         }
         else
         {
@@ -1040,10 +1053,10 @@ void Host::CreateLabel()
     mi.cbSize = sizeof(mi);
     if (!GetMonitorInfoW(MonitorFromWindow(target_, MONITOR_DEFAULTTONEAREST), &mi))
         return;
-    static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR3/4" };
+    static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR3/4", L"DLSS" };
     wchar_t text[64];
     labelH_ = height_;
-    swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 4) ? upMethod_ : 0]);
+    swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 5) ? upMethod_ : 0]);
     label_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT, wc.lpszClassName,
                              text, WS_POPUP, mi.rcMonitor.left + 16, mi.rcMonitor.top + 16, 270, 40, nullptr, nullptr, inst_, nullptr);
     if (!label_)
@@ -1061,10 +1074,10 @@ void Host::UpdateLabel()
     {
         if (label_)
         {
-            static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR3/4" };
+            static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR3/4", L"DLSS" };
             wchar_t text[64];
             labelH_ = height_;
-            swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 4) ? upMethod_ : 0]);
+            swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 5) ? upMethod_ : 0]);
             SetWindowTextW(label_, text);
             InvalidateRect(label_, nullptr, TRUE);
             labelUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(st_.labelSeconds);
@@ -1430,7 +1443,7 @@ bool Host::InitUpscale()
         oh.ptr += static_cast<SIZE_T>(upSrvInc_) * 5;
         dev12_->CreateShaderResourceView(nisOut_.Get(), &ov, oh);
     }
-    if (st_.upscale == 4)
+    if (st_.upscale == 4 || st_.upscale == 5)
         fsrPipesOk_ = InitFsrPipelines(); // on failure CreateUpscaleViews falls back to FSR 1
     return true;
 }
@@ -1504,6 +1517,7 @@ void Host::ReleaseFsrTemporal()
     if (ffxCtx_ && ffxFn_.DestroyContext)
         ffxFn_.DestroyContext(&ffxCtx_, nullptr);
     ffxCtx_ = nullptr;
+    ReleaseDlssFeature();
     fsrTex_[0].Reset();
     fsrTex_[1].Reset();
     fsrBlk_.Reset();
@@ -1522,7 +1536,7 @@ bool Host::InitFsrTemporal()
     WaitGpu();
     ReleaseFsrTemporal();
 
-    if (!ffxModule_)
+    if (upMethod_ != 5 && !ffxModule_)
     {
         // AMD's FidelityFX runtime (SDK 2.x holds FSR 3.1 and FSR 4): next to the program, or in an "fsr" / "FSR 4" folder there
         const std::wstring root = oc::ExeDir();
@@ -1626,6 +1640,21 @@ bool Host::InitFsrTemporal()
     srv(fsrTex_[0].Get(), kFormat, 15);
     srv(fsrBlk_.Get(), DXGI_FORMAT_R16G16_FLOAT, 16);
 
+    if (upMethod_ == 5)
+    {
+        if (!InitDlss())
+        {
+            ReleaseFsrTemporal();
+            return false;
+        }
+        fsrReady_ = true;
+        fsrHavePrev_ = false;
+        fsrCur_ = 1;
+        fsrLast_ = std::chrono::steady_clock::now();
+        Log("DLSS: %ux%u -> %ux%u", width_, height_, outW_, outH_);
+        return true;
+    }
+
     // AMD's upscaling context: gamma-encoded colour (the frame as the game shows it), no jitter, flat depth
     ffxCreateBackendDX12Desc backendDesc{};
     backendDesc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
@@ -1664,6 +1693,200 @@ bool Host::InitFsrTemporal()
     Log("FSR3/4: %ux%u -> %ux%u", width_, height_, outW_, outH_);
     return true;
 }
+
+#ifdef OC_HAVE_NGX
+static void NVSDK_CONV NgxLog(const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature)
+{
+    if (!message)
+        return;
+    std::string line(message);
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+        line.pop_back();
+    if (line.find("error") == std::string::npos && line.find("warning") == std::string::npos)
+        return;
+    Log("[ngx] %s", line.c_str());
+}
+
+bool Host::InitDlss()
+{
+    // NVIDIA's runtime (nvngx_dlss.dll): next to the program, or in a "dlss" folder there
+    const std::wstring root = oc::ExeDir();
+    std::vector<std::wstring> dirs;
+    std::wstring found;
+    for (const wchar_t* d : { L"", L"dlss\\", L"DLSS\\", L"DLSS 4\\", L"fsr\\" })
+    {
+        const std::wstring dir = root + d;
+        if (GetFileAttributesW((dir + L"nvngx_dlss.dll").c_str()) != INVALID_FILE_ATTRIBUTES)
+        {
+            if (found.empty())
+                found = dir;
+            dirs.push_back(!dir.empty() && dir.back() == L'\\' ? dir.substr(0, dir.size() - 1) : dir);
+        }
+    }
+    if (found.empty())
+    {
+        Log("DLSS: nvngx_dlss.dll was not found next to the program (or in a \"dlss\" folder)");
+        return false;
+    }
+    Log("DLSS: runtime %lsnvngx_dlss.dll", found.c_str());
+    if (!ngxInit_)
+    {
+        wchar_t tmp[MAX_PATH] = {};
+        GetTempPathW(MAX_PATH, tmp);
+        std::vector<const wchar_t*> paths;
+        for (const std::wstring& d : dirs)
+            paths.push_back(d.c_str());
+        NVSDK_NGX_FeatureCommonInfo info{};
+        info.PathListInfo.Path = paths.data();
+        info.PathListInfo.Length = static_cast<unsigned>(paths.size());
+        info.LoggingInfo.LoggingCallback = NgxLog;
+        info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
+        info.LoggingInfo.DisableOtherLoggingSinks = false;
+        const NVSDK_NGX_Result r = NVSDK_NGX_D3D12_Init(0x4F43484Full, tmp, dev12_.Get(), &info);
+        if (NVSDK_NGX_FAILED(r))
+        {
+            Log("DLSS: NGX did not start (0x%08x)", static_cast<unsigned>(r));
+            return false;
+        }
+        ngxInit_ = true;
+    }
+    NVSDK_NGX_Parameter* caps = nullptr;
+    int available = 0, needsDriver = 0, initResult = 0;
+    unsigned minMajor = 0, minMinor = 0;
+    if (NVSDK_NGX_SUCCEED(NVSDK_NGX_D3D12_GetCapabilityParameters(&caps)) && caps)
+    {
+        caps->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &available);
+        caps->Get(NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &needsDriver);
+        caps->Get(NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMajor, &minMajor);
+        caps->Get(NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMinor, &minMinor);
+        caps->Get(NVSDK_NGX_Parameter_SuperSampling_FeatureInitResult, &initResult);
+        NVSDK_NGX_D3D12_DestroyParameters(caps);
+    }
+    if (!available)
+    {
+        if (needsDriver)
+            Log("DLSS: needs a newer NVIDIA driver (%u.%u or later)", minMajor, minMinor);
+        else
+            Log("DLSS: Super Resolution is not available on this card/driver (init result 0x%08x). It needs an NVIDIA RTX card.",
+                static_cast<unsigned>(initResult));
+        return false;
+    }
+    NVSDK_NGX_Parameter* p = nullptr;
+    if (NVSDK_NGX_FAILED(NVSDK_NGX_D3D12_AllocateParameters(&p)) || !p)
+    {
+        Log("DLSS: NGX gave no parameters");
+        return false;
+    }
+    ngxParams_ = p;
+
+    const float ratio = static_cast<float>(outW_) / static_cast<float>(width_ ? width_ : 1);
+    const NVSDK_NGX_PerfQuality_Value quality = ratio <= 1.01f ? NVSDK_NGX_PerfQuality_Value_DLAA
+                                                : ratio <= 1.55f ? NVSDK_NGX_PerfQuality_Value_MaxQuality
+                                                : ratio <= 1.75f ? NVSDK_NGX_PerfQuality_Value_Balanced
+                                                : ratio <= 2.2f ? NVSDK_NGX_PerfQuality_Value_MaxPerf
+                                                                : NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+    // model: L when upscaling, E at 1:1; the ini key [Upscale] DlssPreset picks another one (11 = K, lighter on RTX 20/30)
+    unsigned preset = static_cast<unsigned>(st_.dlssPreset);
+    if (preset == 0 || preset == 16)
+        preset = ratio <= 1.01f ? 5u : 12u;
+    p->Set(NVSDK_NGX_Parameter_CreationNodeMask, 1u);
+    p->Set(NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
+    p->Set(NVSDK_NGX_Parameter_Width, width_);
+    p->Set(NVSDK_NGX_Parameter_Height, height_);
+    p->Set(NVSDK_NGX_Parameter_OutWidth, outW_);
+    p->Set(NVSDK_NGX_Parameter_OutHeight, outH_);
+    p->Set(NVSDK_NGX_Parameter_PerfQualityValue, static_cast<int>(quality));
+    p->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, static_cast<int>(NVSDK_NGX_DLSS_Feature_Flags_MVLowRes));
+    p->Set(NVSDK_NGX_Parameter_DLSS_Enable_Output_Subrects, 0);
+    for (const char* key : { NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
+                             NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
+                             NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality })
+        p->Set(key, preset);
+
+    // the feature is created on a command list of its own
+    ComPtr<ID3D12CommandAllocator> alloc;
+    ComPtr<ID3D12GraphicsCommandList> cl;
+    if (FAILED(dev12_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc))) ||
+        FAILED(dev12_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr, IID_PPV_ARGS(&cl))))
+    {
+        Log("DLSS: command list could not be made");
+        return false;
+    }
+    NVSDK_NGX_Handle* handle = nullptr;
+    const NVSDK_NGX_Result r = NVSDK_NGX_D3D12_CreateFeature(cl.Get(), NVSDK_NGX_Feature_SuperSampling, p, &handle);
+    cl->Close();
+    ID3D12CommandList* lists[] = { cl.Get() };
+    queue_->ExecuteCommandLists(1, lists);
+    WaitGpu();
+    if (NVSDK_NGX_FAILED(r) || !handle)
+    {
+        Log("DLSS: could not create the feature (0x%08x)", static_cast<unsigned>(r));
+        return false;
+    }
+    ngxFeature_ = handle;
+    Log("DLSS: model preset %u, x%.2f", preset, ratio);
+    return true;
+}
+
+void Host::ReleaseDlssFeature()
+{
+    if (ngxFeature_)
+        NVSDK_NGX_D3D12_ReleaseFeature(static_cast<NVSDK_NGX_Handle*>(ngxFeature_));
+    ngxFeature_ = nullptr;
+    if (ngxParams_)
+        NVSDK_NGX_D3D12_DestroyParameters(static_cast<NVSDK_NGX_Parameter*>(ngxParams_));
+    ngxParams_ = nullptr;
+}
+
+void Host::ShutdownDlss()
+{
+    ReleaseDlssFeature();
+    if (ngxInit_ && dev12_)
+        NVSDK_NGX_D3D12_Shutdown1(dev12_.Get());
+    ngxInit_ = false;
+}
+
+bool Host::RecordDlss(ID3D12Resource* curTex, bool reset)
+{
+    if (!ngxFeature_ || !ngxParams_)
+        return false;
+    auto* p = static_cast<NVSDK_NGX_Parameter*>(ngxParams_);
+    p->Set(NVSDK_NGX_Parameter_Color, curTex);
+    p->Set(NVSDK_NGX_Parameter_Output, fsrOut_.Get());
+    p->Set(NVSDK_NGX_Parameter_Depth, fsrDepth_.Get());
+    p->Set(NVSDK_NGX_Parameter_MotionVectors, fsrMv_.Get());
+    p->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, fsrReact_.Get()); // where the motion cannot be trusted
+    p->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_SubrectBase_X, 0u);
+    p->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_SubrectBase_Y, 0u);
+    p->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, 0.0f);
+    p->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, 0.0f);
+    p->Set(NVSDK_NGX_Parameter_MV_Scale_X, 1.0f);
+    p->Set(NVSDK_NGX_Parameter_MV_Scale_Y, -1.0f); // the same sign FSR3/4 gets
+    p->Set(NVSDK_NGX_Parameter_Reset, reset ? 1 : 0);
+    p->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f); // the slider is applied afterwards by our RCAS pass
+    p->Set(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, 1.0f);
+    p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, width_);
+    p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, height_);
+    const NVSDK_NGX_Result r = NVSDK_NGX_D3D12_EvaluateFeature_C(list_.Get(), static_cast<NVSDK_NGX_Handle*>(ngxFeature_), p, nullptr);
+    if (NVSDK_NGX_FAILED(r))
+    {
+        static int logged = 0;
+        if (logged++ < 5)
+            Log("DLSS: evaluate failed (0x%08x)", static_cast<unsigned>(r));
+        return false;
+    }
+    return true;
+}
+#else
+bool Host::InitDlss()
+{
+    Log("DLSS: this build has no NVIDIA NGX SDK");
+    return false;
+}
+void Host::ReleaseDlssFeature() {}
+void Host::ShutdownDlss() {}
+bool Host::RecordDlss(ID3D12Resource*, bool) { return false; }
+#endif
 
 // Per frame, before the final pass: the captured frame is copied, its motion measured against the frame before, and AMD's upscaler runs.
 void Host::RecordFsrTemporal()
@@ -1724,6 +1947,13 @@ void Host::RecordFsrTemporal()
         frameMs = 16.666f;
 
     barrier(fsrOut_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (upMethod_ == 5)
+    {
+        RecordDlss(curTex, !fsrHavePrev_);
+        barrier(fsrOut_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        fsrHavePrev_ = true;
+        return;
+    }
     ffxDispatchDescUpscale d{};
     d.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
     d.commandList = list_.Get();
@@ -1768,9 +1998,9 @@ bool Host::CreateUpscaleViews()
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Texture2D.MipLevels = 1;
     dev12_->CreateShaderResourceView(shared12_.Get(), &sv, upSrvHeap_->GetCPUDescriptorHandleForHeapStart());
-    if (upMethod_ == 4 && !InitFsrTemporal())
+    if ((upMethod_ == 4 || upMethod_ == 5) && !InitFsrTemporal())
     {
-        Log("Output scaling: FSR3/4 is not available, using FSR 1 instead");
+        Log("Output scaling: %s is not available, using FSR 1 instead", upMethod_ == 5 ? "DLSS" : "FSR3/4");
         upMethod_ = 2;
     }
     return true;
@@ -1796,7 +2026,7 @@ void Host::RecordUpscale(ID3D12Resource* bb, UINT idx)
         list_->ResourceBarrier(1, &b);
     };
 
-    const bool fsrTemporal = upMethod_ == 4 && fsrReady_;
+    const bool fsrTemporal = (upMethod_ == 4 || upMethod_ == 5) && fsrReady_;
     if (fsrTemporal)
         RecordFsrTemporal(); // changes the list's heap and root signature: the graphics ones are set again below
 
@@ -2492,6 +2722,7 @@ void Host::Shutdown()
     if (ffxCtx_ && ffxFn_.DestroyContext)
         ffxFn_.DestroyContext(&ffxCtx_, nullptr);
     ffxCtx_ = nullptr;
+    ShutdownDlss();
     UnregisterHotkeys();
     if (parentProc_)
         CloseHandle(parentProc_);

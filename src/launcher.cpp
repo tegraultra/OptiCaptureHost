@@ -1500,15 +1500,15 @@ class App
     gp::RectF upSliderRect_{};
     bool upSliding_ = false;
     ULONGLONG upSliderSaved_ = 0;
-    int UpSharpValue() const { return (st_.upscale == 3 || st_.upscale == 4) ? st_.nisSharp : (st_.upscale == 2 ? 100 - st_.upscaleSharp : 0); }
+    int UpSharpValue() const { return (st_.upscale == 3 || st_.upscale == 4 || st_.upscale == 5) ? st_.nisSharp : (st_.upscale == 2 ? 100 - st_.upscaleSharp : 0); }
     void SetUpSharpFromX(int x, bool save)
     {
-        if (st_.upscale != 2 && st_.upscale != 3 && st_.upscale != 4)
+        if (st_.upscale != 2 && st_.upscale != 3 && st_.upscale != 4 && st_.upscale != 5)
             return;
         float f = (static_cast<float>(x) - upSliderRect_.X) / upSliderRect_.Width;
         f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
         const int v = static_cast<int>(f * 100.0f + 0.5f);
-        if (st_.upscale == 3 || st_.upscale == 4)
+        if (st_.upscale == 3 || st_.upscale == 4 || st_.upscale == 5)
             st_.nisSharp = v;
         else
             st_.upscaleSharp = 100 - v;
@@ -3232,11 +3232,12 @@ void App::OnClick(int id)
         }
         static const wchar_t* lvName[] = { L"Quality  (1.5x", L"Balanced  (1.7x", L"Performance  (2x", L"Native  (1x" };
         static const double lvF[] = { 1.5, 1.7, 2.0, 1.0 };
-        static const wchar_t* mName[] = { L"", L"Bilinear", L"FSR 1", L"NIS", L"FSR3/4" };   // by method number
-        // order: FSR3/4 Native first, then FSR3/4 Quality / Balanced / Performance, then FSR 1, NIS and bilinear, Off last
+        static const wchar_t* mName[] = { L"", L"Bilinear", L"FSR 1", L"NIS", L"FSR3/4", L"DLSS" };   // by method number
+        // order: FSR3/4 Native first, then FSR3/4 Quality / Balanced / Performance, DLSS the same, then FSR 1, NIS and bilinear, Off last
         struct Entry { int method; int level; };
         static const Entry entries[] = {
             { 4, 3 }, { 4, 0 }, { 4, 1 }, { 4, 2 },
+            { 5, 3 }, { 5, 0 }, { 5, 1 }, { 5, 2 },
             { 2, 0 }, { 2, 1 }, { 2, 2 }, { 3, 0 }, { 3, 1 }, { 3, 2 }, { 1, 0 }, { 1, 1 }, { 1, 2 } };
         constexpr int kEntries = static_cast<int>(sizeof(entries) / sizeof(entries[0]));
         HMENU menu = CreatePopupMenu();
@@ -3244,7 +3245,7 @@ void App::OnClick(int id)
         {
             for (int i = 0; i < kEntries; ++i)
             {
-                if (i == 4)
+                if (i == 4 || i == 8)
                     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
                 const Entry& e = entries[i];
                 const int cw = (static_cast<int>(mw / lvF[e.level] + 0.5)) & ~1;
@@ -3964,7 +3965,7 @@ void App::Paint(HDC dc, int W, int H)
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
         std::wstring t = L"Off";
         if (st_.upscale != 0)
-            t = std::wstring(st_.upscale == 2 ? L"FSR 1  \u00B7  " : (st_.upscale == 3 ? L"NIS  \u00B7  " : (st_.upscale == 4 ? L"FSR3/4  \u00B7  " : L"Bilinear  \u00B7  "))) +
+            t = std::wstring(st_.upscale == 2 ? L"FSR 1  \u00B7  " : (st_.upscale == 3 ? L"NIS  \u00B7  " : (st_.upscale == 4 ? L"FSR3/4  \u00B7  " : (st_.upscale == 5 ? L"DLSS  \u00B7  " : L"Bilinear  \u00B7  ")))) +
                 lvN[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 3) ? st_.upscaleLevel : 1];
         Text(g, t, *f_.chip, R(186, 740, 212, 22), col::Text());
         AddHit(selector, kIdUpSelect);
@@ -3981,7 +3982,7 @@ void App::Paint(HDC dc, int W, int H)
 
     // ---- sharpness slider (FSR 1: RCAS, NIS: sharpness); bilinear has none ----
     {
-        const bool has = st_.upscale == 2 || st_.upscale == 3 || st_.upscale == 4;
+        const bool has = st_.upscale == 2 || st_.upscale == 3 || st_.upscale == 4 || st_.upscale == 5;
         Text(g, L"Sharpness", *f_.bodyB, R(44, 800, 130, 24), has ? col::Text() : col::Muted());
         const gp::RectF track = R(176, 808, 268, 6);
         upSliderRect_ = track;
