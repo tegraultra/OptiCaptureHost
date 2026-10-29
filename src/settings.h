@@ -114,7 +114,7 @@ inline void LoadSettings(Settings& s)
     s.presentMode = GetPrivateProfileIntW(L"Advanced", L"PresentMode", 3, path.c_str());
     if (s.presentMode < 0 || s.presentMode > 6) s.presentMode = 3;
     s.upscale = GetPrivateProfileIntW(L"Upscale", L"Method", 4, path.c_str());
-    if (s.upscale < 0 || s.upscale > 5) s.upscale = 4;
+    if (s.upscale < 0 || s.upscale > 6) s.upscale = 4;
     s.dlssPreset = GetPrivateProfileIntW(L"Upscale", L"DlssPreset", 0, path.c_str());
     if (s.dlssPreset < 0 || s.dlssPreset > 16) s.dlssPreset = 0;
     s.upscaleLevel = GetPrivateProfileIntW(L"Upscale", L"Level", 0, path.c_str());

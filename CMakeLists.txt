@@ -12,6 +12,14 @@ target_compile_options(OptiCaptureHost PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_include_directories(OptiCaptureHost PRIVATE third_party/ffx/include)
 target_link_libraries(OptiCaptureHost PRIVATE d3d11 d3d12 d3dcompiler dxgi dwmapi shcore shell32 user32 windowsapp)
 
+# Intel XeSS (headers only: libxess.dll is loaded at run time); the build workflow fetches them into third_party/xess.
+if(EXISTS ${CMAKE_SOURCE_DIR}/third_party/xess/inc/xess/xess_d3d12.h)
+    message(STATUS "Intel XeSS headers found: XeSS enabled")
+    target_include_directories(OptiCaptureHost PRIVATE ${CMAKE_SOURCE_DIR}/third_party/xess/inc)
+else()
+    message(STATUS "Intel XeSS headers not found: building without XeSS")
+endif()
+
 # NVIDIA DLSS (NGX SDK: headers + nvsdk_ngx_s.lib from https://github.com/NVIDIA/DLSS, fetched by the build workflow into third_party/ngx).
 # Without those files the host still builds, just without the DLSS option.
 set(NGX_DIR ${CMAKE_SOURCE_DIR}/third_party/ngx)
