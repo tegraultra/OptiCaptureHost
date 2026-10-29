@@ -1816,6 +1816,7 @@ bool Host::InitXess()
         XESS_QUALITY_SETTING_ULTRA_PERFORMANCE };
     xess_quality_settings_t quality = XESS_QUALITY_SETTING_ULTRA_PERFORMANCE;
     bool fits = false;
+    int bestDiff = 0;
     for (const xess_quality_settings_t q : kQualities)
     {
         xess_2d_t optimal{}, lo{}, hi{};
@@ -1831,9 +1832,14 @@ bool Host::InitXess()
         Log("XeSS:   setting %d takes inputs %ux%u .. %ux%u (best %ux%u)", static_cast<int>(q), lo.x, lo.y, hi.x, hi.y, optimal.x, optimal.y);
         if (width_ >= lo.x && width_ <= hi.x && height_ >= lo.y && height_ <= hi.y)
         {
-            quality = q;
-            fits = true;
-            break;
+            // several settings accept the size (AA takes a wide range): the one whose own ratio is closest to ours
+            const int diff = std::abs(static_cast<int>(optimal.x) - static_cast<int>(width_));
+            if (!fits || diff < bestDiff)
+            {
+                quality = q;
+                bestDiff = diff;
+                fits = true;
+            }
         }
     }
     if (!fits)
