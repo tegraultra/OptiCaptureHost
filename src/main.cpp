@@ -1880,7 +1880,7 @@ bool Host::RecordDlss(ID3D12Resource* curTex, bool reset)
 #else
 bool Host::InitDlss()
 {
-    Log("DLSS: this build has no NVIDIA NGX SDK");
+    Log("DLSS: this build has no NVIDIA NGX SDK (the \"Fetch NVIDIA DLSS SDK\" step of the build did not run or failed)");
     return false;
 }
 void Host::ReleaseDlssFeature() {}

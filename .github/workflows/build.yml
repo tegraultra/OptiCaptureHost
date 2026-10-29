@@ -14,6 +14,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # NVIDIA's DLSS SDK (headers + static library), from NVIDIA's own public repository, pinned to one commit.
+      # git (with LFS) is used so it works whether or not the files are stored in LFS. If this step fails the host is built without DLSS.
+      - name: Fetch NVIDIA DLSS SDK
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $c = '374959484e79a640feaba44c93ac8cfb0a03f5b5'
+          git lfs install --skip-repo
+          git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/DLSS.git nvdlss
+          if ($LASTEXITCODE -ne 0) { Write-Host "::warning::could not clone NVIDIA/DLSS"; exit 1 }
+          Push-Location nvdlss
+          git checkout $c -- include lib/Windows_x86_64/x64
+          if ($LASTEXITCODE -ne 0) { Write-Host "::warning::could not check out the DLSS SDK files"; exit 1 }
+          Pop-Location
+          New-Item -ItemType Directory -Force third_party/ngx/include, third_party/ngx/lib | Out-Null
+          Copy-Item nvdlss/include/nvsdk_ngx*.h third_party/ngx/include/
+          Copy-Item nvdlss/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib third_party/ngx/lib/
+          Get-ChildItem -Recurse third_party/ngx | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+          if ((Get-Item third_party/ngx/lib/nvsdk_ngx_s.lib).Length -lt 100000) {
+            Write-Host "::warning::nvsdk_ngx_s.lib is too small (an LFS pointer?)"
+            Remove-Item -Recurse -Force third_party/ngx
+            exit 1
+          }
+
       - name: Configure
         run: cmake -S . -B build -A x64
 
