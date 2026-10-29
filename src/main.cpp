@@ -66,10 +66,6 @@
 #include "ffx_api/ffx_upscale.h"
 #include "ffx_api/ffx_api_loader.h"
 #include "ffx_api/dx12/ffx_api_dx12.h"
-#if __has_include("xess/xess_d3d12.h")
-#include "xess/xess_d3d12.h"
-#endif
-#include <type_traits>
 #ifdef OC_HAVE_NGX
 #include "nvsdk_ngx.h"
 #include "nvsdk_ngx_defs.h"
@@ -498,7 +494,6 @@ LRESULT CALLBACK LabelProc(HWND h, UINT m, WPARAM w, LPARAM l)
     return DefWindowProcW(h, m, w, l);
 }
 
-struct XessApi;
 class Host
 {
   public:
@@ -518,10 +513,6 @@ class Host
     bool InitFsrTemporal();
     void ReleaseFsrTemporal();
     void RecordFsrTemporal();
-    XessApi* xess_ = nullptr;
-    bool InitXess();
-    bool RecordXess(ID3D12Resource* curTex, bool reset);
-    void ShutdownXess();
     bool InitDlss();
     void ReleaseDlssFeature();
     void ShutdownDlss();
@@ -914,7 +905,7 @@ bool Host::InitOverlayAndSwapChain()
         }
         if (upOn_)
         {
-            Log("Output scaling: %s, %ux%u -> %ux%u (sharpness %.2f)", st_.upscale == 1 ? "bilinear" : (st_.upscale == 3 ? "NIS" : (st_.upscale == 4 ? "FSR3/4" : (st_.upscale == 5 ? "DLSS" : (st_.upscale == 6 ? "XeSS" : "FSR 1")))), width_, height_,
+            Log("Output scaling: %s, %ux%u -> %ux%u (sharpness %.2f)", st_.upscale == 1 ? "bilinear" : (st_.upscale == 3 ? "NIS" : (st_.upscale == 4 ? "FSR3/4" : (st_.upscale == 5 ? "DLSS" : "FSR 1"))), width_, height_,
                 outW_, outH_, ((st_.upscale >= 3) ? st_.nisSharp : st_.upscaleSharp) / 100.0);
         }
         else
@@ -1062,10 +1053,10 @@ void Host::CreateLabel()
     mi.cbSize = sizeof(mi);
     if (!GetMonitorInfoW(MonitorFromWindow(target_, MONITOR_DEFAULTTONEAREST), &mi))
         return;
-    static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR3/4", L"DLSS", L"XeSS" };
+    static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR3/4", L"DLSS" };
     wchar_t text[64];
     labelH_ = height_;
-    swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 6) ? upMethod_ : 0]);
+    swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 5) ? upMethod_ : 0]);
     label_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT, wc.lpszClassName,
                              text, WS_POPUP, mi.rcMonitor.left + 16, mi.rcMonitor.top + 16, 270, 40, nullptr, nullptr, inst_, nullptr);
     if (!label_)
@@ -1083,10 +1074,10 @@ void Host::UpdateLabel()
     {
         if (label_)
         {
-            static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR3/4", L"DLSS", L"XeSS" };
+            static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR3/4", L"DLSS" };
             wchar_t text[64];
             labelH_ = height_;
-            swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 6) ? upMethod_ : 0]);
+            swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 5) ? upMethod_ : 0]);
             SetWindowTextW(label_, text);
             InvalidateRect(label_, nullptr, TRUE);
             labelUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(st_.labelSeconds);
@@ -1649,9 +1640,9 @@ bool Host::InitFsrTemporal()
     srv(fsrTex_[0].Get(), kFormat, 15);
     srv(fsrBlk_.Get(), DXGI_FORMAT_R16G16_FLOAT, 16);
 
-    if (upMethod_ >= 5)
+    if (upMethod_ == 5)
     {
-        if (upMethod_ == 5 ? !InitDlss() : !InitXess())
+        if (!InitDlss())
         {
             ReleaseFsrTemporal();
             return false;
@@ -1660,7 +1651,7 @@ bool Host::InitFsrTemporal()
         fsrHavePrev_ = false;
         fsrCur_ = 1;
         fsrLast_ = std::chrono::steady_clock::now();
-        Log("%s: %ux%u -> %ux%u", upMethod_ == 5 ? "DLSS" : "XeSS", width_, height_, outW_, outH_);
+        Log("DLSS: %ux%u -> %ux%u", width_, height_, outW_, outH_);
         return true;
     }
 
@@ -1702,251 +1693,6 @@ bool Host::InitFsrTemporal()
     Log("FSR3/4: %ux%u -> %ux%u", width_, height_, outW_, outH_);
     return true;
 }
-
-#if __has_include("xess/xess_d3d12.h")
-struct XessApi
-{
-    HMODULE module = nullptr;
-    xess_context_handle_t context = nullptr;
-    decltype(&xessGetVersion) GetVersion = nullptr;
-    decltype(&xessD3D12CreateContext) CreateContext = nullptr;
-    decltype(&xessGetOptimalInputResolution) OptimalInput = nullptr;
-    decltype(&xessD3D12Init) Init = nullptr;
-    decltype(&xessD3D12Execute) Execute = nullptr;
-    decltype(&xessDestroyContext) DestroyContext = nullptr;
-    decltype(&xessSetMaxResponsiveMaskValue) SetMaxResponsive = nullptr;
-    bool initialised = false;
-};
-
-// Calls into Intel's runtime, caught: a crash inside it is logged and the host falls back instead of dying.
-static const xess_result_t kXessCrashed = static_cast<xess_result_t>(-9999);
-static unsigned g_xessCrashCode = 0;
-static xess_result_t SafeXessOptimal(XessApi& x, const xess_2d_t* out, xess_quality_settings_t q, xess_2d_t* opt, xess_2d_t* lo, xess_2d_t* hi)
-{
-    __try
-    {
-        return x.OptimalInput(x.context, out, q, opt, lo, hi);
-    }
-    __except (g_xessCrashCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER)
-    {
-        return kXessCrashed;
-    }
-}
-// Logs every exception raised while Intel's runtime sets up (first chance), with the module it came from: for finding out what kills it.
-static LONG CALLBACK XessVeh(EXCEPTION_POINTERS* e)
-{
-    static int count = 0;
-    const DWORD code = e->ExceptionRecord->ExceptionCode;
-    if (count >= 20 || code == 0x40010006 || code == 0x406D1388 || code == 0x4001000A)
-        return EXCEPTION_CONTINUE_SEARCH;
-    ++count;
-    HMODULE mod = nullptr;
-    wchar_t name[MAX_PATH] = L"?";
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           static_cast<LPCWSTR>(e->ExceptionRecord->ExceptionAddress), &mod))
-        GetModuleFileNameW(mod, name, MAX_PATH);
-    Log("XeSS: exception 0x%08lx at %p (%ls +0x%llx)", code, e->ExceptionRecord->ExceptionAddress, name,
-        static_cast<unsigned long long>(reinterpret_cast<BYTE*>(e->ExceptionRecord->ExceptionAddress) - reinterpret_cast<BYTE*>(mod)));
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
-static xess_result_t SafeXessInitInner(XessApi& x, const xess_d3d12_init_params_t* ip)
-{
-    __try
-    {
-        return x.Init(x.context, ip);
-    }
-    __except (g_xessCrashCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER)
-    {
-        return kXessCrashed;
-    }
-}
-static xess_result_t SafeXessInit(XessApi& x, const xess_d3d12_init_params_t* ip)
-{
-    PVOID veh = AddVectoredExceptionHandler(1, XessVeh);
-    const xess_result_t rc = SafeXessInitInner(x, ip);
-    if (veh)
-        RemoveVectoredExceptionHandler(veh);
-    return rc;
-}
-static xess_result_t SafeXessExecute(XessApi& x, ID3D12GraphicsCommandList* cl, xess_d3d12_execute_params_t* p)
-{
-    __try
-    {
-        return x.Execute(x.context, cl, p);
-    }
-    __except (g_xessCrashCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER)
-    {
-        return kXessCrashed;
-    }
-}
-
-bool Host::InitXess()
-{
-    if (!xess_)
-        xess_ = new XessApi;
-    XessApi& x = *xess_;
-    if (!x.module)
-    {
-        // Intel's runtime (libxess.dll): next to the program, or in an "xess" folder there
-        const std::wstring root = oc::ExeDir();
-        for (const wchar_t* d : { L"", L"xess\\", L"XeSS\\", L"dlss\\", L"fsr\\" })
-        {
-            const std::wstring path = root + d + L"libxess.dll";
-            if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
-                continue;
-            x.module = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-            if (!x.module)
-            {
-                Log("XeSS: %ls could not be loaded (error %lu)", path.c_str(), GetLastError());
-                continue;
-            }
-            Log("XeSS: runtime %ls", path.c_str());
-            break;
-        }
-        if (!x.module)
-        {
-            Log("XeSS: libxess.dll was not found next to the program (or in an \"xess\" folder)");
-            return false;
-        }
-    }
-    auto get = [&](auto& fn, const char* name) {
-        fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(GetProcAddress(x.module, name));
-        return fn != nullptr;
-    };
-    if (!get(x.GetVersion, "xessGetVersion") || !get(x.CreateContext, "xessD3D12CreateContext") ||
-        !get(x.OptimalInput, "xessGetOptimalInputResolution") || !get(x.Init, "xessD3D12Init") || !get(x.Execute, "xessD3D12Execute") ||
-        !get(x.DestroyContext, "xessDestroyContext") || !get(x.SetMaxResponsive, "xessSetMaxResponsiveMaskValue"))
-    {
-        Log("XeSS: libxess.dll lacks functions this program needs");
-        return false;
-    }
-    if (!x.context)
-    {
-        const xess_result_t rc = x.CreateContext(dev12_.Get(), &x.context);
-        if (rc != XESS_RESULT_SUCCESS || !x.context)
-        {
-            x.context = nullptr;
-            Log("XeSS: could not make its context (code %d). It needs Shader Model 6.4.", static_cast<int>(rc));
-            return false;
-        }
-        xess_version_t v{};
-        x.GetVersion(&v);
-        Log("XeSS: version %u.%u.%u", v.major, v.minor, v.patch);
-    }
-    x.initialised = false;
-    // XeSS's quality settings are fixed ratios, each with a range of input sizes it takes: the first (finest) whose range holds our size
-    const xess_2d_t outRes{ outW_, outH_ };
-    static const xess_quality_settings_t kQualities[] = { XESS_QUALITY_SETTING_AA, XESS_QUALITY_SETTING_ULTRA_QUALITY_PLUS,
-        XESS_QUALITY_SETTING_ULTRA_QUALITY, XESS_QUALITY_SETTING_QUALITY, XESS_QUALITY_SETTING_BALANCED, XESS_QUALITY_SETTING_PERFORMANCE,
-        XESS_QUALITY_SETTING_ULTRA_PERFORMANCE };
-    xess_quality_settings_t quality = XESS_QUALITY_SETTING_ULTRA_PERFORMANCE;
-    bool fits = false;
-    int bestDiff = 0;
-    for (const xess_quality_settings_t q : kQualities)
-    {
-        xess_2d_t optimal{}, lo{}, hi{};
-        Log("XeSS: asking for the input size of quality setting %d", static_cast<int>(q));
-        const xess_result_t orc = SafeXessOptimal(x, &outRes, q, &optimal, &lo, &hi);
-        if (orc == kXessCrashed)
-        {
-            Log("XeSS: the runtime crashed (exception 0x%08x) while asking for sizes", g_xessCrashCode);
-            return false;
-        }
-        if (orc != XESS_RESULT_SUCCESS)
-            continue;
-        Log("XeSS:   setting %d takes inputs %ux%u .. %ux%u (best %ux%u)", static_cast<int>(q), lo.x, lo.y, hi.x, hi.y, optimal.x, optimal.y);
-        if (width_ >= lo.x && width_ <= hi.x && height_ >= lo.y && height_ <= hi.y)
-        {
-            // several settings accept the size (AA takes a wide range): the one whose own ratio is closest to ours
-            const int diff = std::abs(static_cast<int>(optimal.x) - static_cast<int>(width_));
-            if (!fits || diff < bestDiff)
-            {
-                quality = q;
-                bestDiff = diff;
-                fits = true;
-            }
-        }
-    }
-    if (!fits)
-    {
-        Log("XeSS: takes no input of %ux%u for an output of %ux%u", width_, height_, outW_, outH_);
-        return false;
-    }
-    xess_d3d12_init_params_t ip{};
-    ip.outputResolution = outRes;
-    ip.qualitySetting = quality;
-    ip.initFlags = XESS_INIT_FLAG_LDR_INPUT_COLOR | XESS_INIT_FLAG_RESPONSIVE_PIXEL_MASK; // the frame as the game shows it; our mask as the responsive one
-    ip.creationNodeMask = 1;
-    ip.visibleNodeMask = 1;
-    Log("XeSS: setting it up (quality %d)", static_cast<int>(quality));
-    const xess_result_t rc = SafeXessInit(x, &ip);
-    if (rc == kXessCrashed)
-    {
-        Log("XeSS: the runtime crashed (exception 0x%08x) while setting up", g_xessCrashCode);
-        return false;
-    }
-    if (rc != XESS_RESULT_SUCCESS)
-    {
-        Log("XeSS: could not be set up (code %d)", static_cast<int>(rc));
-        return false;
-    }
-    x.SetMaxResponsive(x.context, 1.0f);
-    x.initialised = true;
-    Log("XeSS: quality setting %d", static_cast<int>(quality));
-    return true;
-}
-
-bool Host::RecordXess(ID3D12Resource* curTex, bool reset)
-{
-    if (!xess_ || !xess_->initialised)
-        return false;
-    xess_d3d12_execute_params_t x{};
-    x.pColorTexture = curTex;
-    x.pVelocityTexture = fsrMv_.Get();
-    x.pDepthTexture = fsrDepth_.Get();
-    x.pOutputTexture = fsrOut_.Get();
-    x.pResponsivePixelMaskTexture = fsrReact_.Get(); // where the motion cannot be trusted
-    x.jitterOffsetX = 0.0f;
-    x.jitterOffsetY = 0.0f;
-    x.exposureScale = 1.0f;
-    x.resetHistory = reset ? 1u : 0u;
-    x.inputWidth = width_;
-    x.inputHeight = height_;
-    const xess_result_t rc = SafeXessExecute(*xess_, list_.Get(), &x);
-    if (rc != XESS_RESULT_SUCCESS)
-    {
-        static int logged = 0;
-        if (logged++ < 5)
-            Log("XeSS: execute failed (code %d)", static_cast<int>(rc));
-        return false;
-    }
-    return true;
-}
-
-void Host::ShutdownXess()
-{
-    if (!xess_)
-        return;
-    if (xess_->context && xess_->DestroyContext)
-        xess_->DestroyContext(xess_->context);
-    if (xess_->module)
-        FreeLibrary(xess_->module);
-    delete xess_;
-    xess_ = nullptr;
-}
-#else
-struct XessApi
-{
-};
-bool Host::InitXess()
-{
-    Log("XeSS: this build has no Intel XeSS headers (the \"Fetch Intel XeSS SDK\" step of the build did not run or failed)");
-    return false;
-}
-bool Host::RecordXess(ID3D12Resource*, bool) { return false; }
-void Host::ShutdownXess() {}
-#endif
 
 #ifdef OC_HAVE_NGX
 static void NVSDK_CONV NgxLog(const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature)
@@ -2201,12 +1947,9 @@ void Host::RecordFsrTemporal()
         frameMs = 16.666f;
 
     barrier(fsrOut_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    if (upMethod_ >= 5)
+    if (upMethod_ == 5)
     {
-        if (upMethod_ == 5)
-            RecordDlss(curTex, !fsrHavePrev_);
-        else
-            RecordXess(curTex, !fsrHavePrev_);
+        RecordDlss(curTex, !fsrHavePrev_);
         barrier(fsrOut_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         fsrHavePrev_ = true;
         return;
@@ -2257,7 +2000,7 @@ bool Host::CreateUpscaleViews()
     dev12_->CreateShaderResourceView(shared12_.Get(), &sv, upSrvHeap_->GetCPUDescriptorHandleForHeapStart());
     if (upMethod_ >= 4 && !InitFsrTemporal())
     {
-        Log("Output scaling: %s is not available, using FSR 1 instead", upMethod_ == 5 ? "DLSS" : (upMethod_ == 6 ? "XeSS" : "FSR3/4"));
+        Log("Output scaling: %s is not available, using FSR 1 instead", upMethod_ == 5 ? "DLSS" : "FSR3/4");
         upMethod_ = 2;
     }
     return true;
@@ -2980,7 +2723,6 @@ void Host::Shutdown()
         ffxFn_.DestroyContext(&ffxCtx_, nullptr);
     ffxCtx_ = nullptr;
     ShutdownDlss();
-    ShutdownXess();
     UnregisterHotkeys();
     if (parentProc_)
         CloseHandle(parentProc_);

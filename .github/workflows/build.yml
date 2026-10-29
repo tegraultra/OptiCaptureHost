@@ -49,23 +49,6 @@ jobs:
             exit 1
           }
 
-      # Intel's XeSS SDK (headers + libxess.dll), from Intel's own public release, checked against its SHA-256.
-      # If this step fails the host is built without XeSS.
-      - name: Fetch Intel XeSS SDK
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          $url = 'https://github.com/intel/xess/releases/download/v3.0.2/XeSS_SDK_3.0.2.zip'
-          $zipSha = '88b8a373f30e33f3558a77a93e634f11b8132fc3047ea1a8edeead32b8471990'
-          Invoke-WebRequest $url -OutFile xess_sdk.zip -UseBasicParsing
-          $got = (Get-FileHash -Algorithm SHA256 xess_sdk.zip).Hash.ToLowerInvariant()
-          if ($got -ne $zipSha) { Write-Host "::warning::XeSS SDK checksum mismatch ($got); building without XeSS"; exit 1 }
-          Expand-Archive xess_sdk.zip -DestinationPath xess_sdk -Force
-          New-Item -ItemType Directory -Force third_party/xess/inc, xess_runtime | Out-Null
-          Copy-Item -Recurse -Force xess_sdk/inc/xess third_party/xess/inc/
-          Copy-Item -Force xess_sdk/bin/libxess.dll, xess_sdk/LICENSE.txt xess_runtime/
-          Get-ChildItem -Recurse third_party/xess, xess_runtime -File | ForEach-Object { Write-Host "$($_.FullName)  $($_.Length)" }
-
       - name: Configure
         run: cmake -S . -B build -A x64
 
@@ -79,7 +62,6 @@ jobs:
           Copy-Item build/Release/OptiCaptureHost.exe dist/
           Copy-Item build/Release/OptiCaptureLauncher.exe dist/
           Copy-Item README.md dist/
-          if (Test-Path xess_runtime/libxess.dll) { Copy-Item xess_runtime/libxess.dll dist/; Copy-Item xess_runtime/LICENSE.txt dist/XeSS-LICENSE.txt }
           Compress-Archive -Path dist/* -DestinationPath OptiCaptureHost-win64.zip -Force
 
       - uses: actions/upload-artifact@v4

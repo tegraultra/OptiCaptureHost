@@ -53,3 +53,8 @@ shrinks the game window to monitor size / level (any monitor, 1080p to 4K) and t
 The Resize button does the shrinking without starting. Settings are in `[Upscale]` of OptiCaptureHost.ini
 (`Method` 0 off / 1 bilinear / 2 FSR 1 / 3 NIS, `Level` 0..2, `Sharpness` x100, 0 = sharpest, default 25). Applies at the next start.
 The mouse is not remapped: the pointer lands where it is on the real desktop, not on the scaled picture.
+
+## DLSS (experimental)
+Output scaling has a **DLSS** entry (Native / Quality / Balanced / Performance) next to FSR3/4. It needs an NVIDIA RTX card and NVIDIA's `nvngx_dlss.dll`,
+placed next to `OptiCaptureHost.exe` (or in a `dlss` folder there). It uses the same measured motion as FSR3/4. The model is chosen automatically
+(L when upscaling, E at 1:1); `[Upscale] DlssPreset` in `OptiCaptureHost.ini` overrides it (11 = K, lighter on RTX 20/30; 13 = M). If the runtime or card is missing, the host falls back to FSR 1.
