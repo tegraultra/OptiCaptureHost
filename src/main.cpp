@@ -1963,7 +1963,7 @@ void Host::RecordFsrTemporal()
     d.reactive = ffxApiGetResourceDX12(fsrReact_.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ); // where the motion cannot be trusted
     d.output = ffxApiGetResourceDX12(fsrOut_.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     d.jitterOffset = { 0.0f, 0.0f };
-    d.motionVectorScale = { -1.0f, -1.0f }; // sub-pixel vectors with inverted Y for DX12 / OptiScaler FG
+    d.motionVectorScale = { 1.0f, 1.0f }; // sub-pixel vectors with inverted Y for DX12 / OptiScaler FG
     d.renderSize = { width_, height_ };
     d.upscaleSize = { outW_, outH_ };
     d.enableSharpening = false; // the sharpness slider is applied afterwards by our RCAS pass (RecordUpscale)
