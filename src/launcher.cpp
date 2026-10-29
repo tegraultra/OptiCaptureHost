@@ -4218,7 +4218,7 @@ void App::Paint(HDC dc, int W, int H)
                 L"AMD FSR 4.1.2"
             };
 
-            Text(g, L"Upscaler", *f_.bodyB,
+            Text(g, L"Opti Upscaler", *f_.bodyB,
                 R(560, 448, 230, 24), col::Text());
 
             const gp::RectF selector = R(560, 472, 230, 30);
