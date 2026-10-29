@@ -1732,7 +1732,25 @@ static xess_result_t SafeXessOptimal(XessApi& x, const xess_2d_t* out, xess_qual
         return kXessCrashed;
     }
 }
-static xess_result_t SafeXessInit(XessApi& x, const xess_d3d12_init_params_t* ip)
+// Logs every exception raised while Intel's runtime sets up (first chance), with the module it came from: for finding out what kills it.
+static LONG CALLBACK XessVeh(EXCEPTION_POINTERS* e)
+{
+    static int count = 0;
+    const DWORD code = e->ExceptionRecord->ExceptionCode;
+    if (count >= 20 || code == 0x40010006 || code == 0x406D1388 || code == 0x4001000A)
+        return EXCEPTION_CONTINUE_SEARCH;
+    ++count;
+    HMODULE mod = nullptr;
+    wchar_t name[MAX_PATH] = L"?";
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(e->ExceptionRecord->ExceptionAddress), &mod))
+        GetModuleFileNameW(mod, name, MAX_PATH);
+    Log("XeSS: exception 0x%08lx at %p (%ls +0x%llx)", code, e->ExceptionRecord->ExceptionAddress, name,
+        static_cast<unsigned long long>(reinterpret_cast<BYTE*>(e->ExceptionRecord->ExceptionAddress) - reinterpret_cast<BYTE*>(mod)));
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static xess_result_t SafeXessInitInner(XessApi& x, const xess_d3d12_init_params_t* ip)
 {
     __try
     {
@@ -1742,6 +1760,14 @@ static xess_result_t SafeXessInit(XessApi& x, const xess_d3d12_init_params_t* ip
     {
         return kXessCrashed;
     }
+}
+static xess_result_t SafeXessInit(XessApi& x, const xess_d3d12_init_params_t* ip)
+{
+    PVOID veh = AddVectoredExceptionHandler(1, XessVeh);
+    const xess_result_t rc = SafeXessInitInner(x, ip);
+    if (veh)
+        RemoveVectoredExceptionHandler(veh);
+    return rc;
 }
 static xess_result_t SafeXessExecute(XessApi& x, ID3D12GraphicsCommandList* cl, xess_d3d12_execute_params_t* p)
 {
