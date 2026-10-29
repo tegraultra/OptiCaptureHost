@@ -498,6 +498,7 @@ LRESULT CALLBACK LabelProc(HWND h, UINT m, WPARAM w, LPARAM l)
     return DefWindowProcW(h, m, w, l);
 }
 
+struct XessApi;
 class Host
 {
   public:
@@ -517,7 +518,6 @@ class Host
     bool InitFsrTemporal();
     void ReleaseFsrTemporal();
     void RecordFsrTemporal();
-    struct XessApi;
     XessApi* xess_ = nullptr;
     bool InitXess();
     bool RecordXess(ID3D12Resource* curTex, bool reset);
@@ -1704,7 +1704,7 @@ bool Host::InitFsrTemporal()
 }
 
 #if __has_include("xess/xess_d3d12.h")
-struct Host::XessApi
+struct XessApi
 {
     HMODULE module = nullptr;
     xess_context_handle_t context = nullptr;
@@ -1717,6 +1717,43 @@ struct Host::XessApi
     decltype(&xessSetMaxResponsiveMaskValue) SetMaxResponsive = nullptr;
     bool initialised = false;
 };
+
+// Calls into Intel's runtime, caught: a crash inside it is logged and the host falls back instead of dying.
+static const xess_result_t kXessCrashed = static_cast<xess_result_t>(-9999);
+static unsigned g_xessCrashCode = 0;
+static xess_result_t SafeXessOptimal(XessApi& x, const xess_2d_t* out, xess_quality_settings_t q, xess_2d_t* opt, xess_2d_t* lo, xess_2d_t* hi)
+{
+    __try
+    {
+        return x.OptimalInput(x.context, out, q, opt, lo, hi);
+    }
+    __except (g_xessCrashCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER)
+    {
+        return kXessCrashed;
+    }
+}
+static xess_result_t SafeXessInit(XessApi& x, const xess_d3d12_init_params_t* ip)
+{
+    __try
+    {
+        return x.Init(x.context, ip);
+    }
+    __except (g_xessCrashCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER)
+    {
+        return kXessCrashed;
+    }
+}
+static xess_result_t SafeXessExecute(XessApi& x, ID3D12GraphicsCommandList* cl, xess_d3d12_execute_params_t* p)
+{
+    __try
+    {
+        return x.Execute(x.context, cl, p);
+    }
+    __except (g_xessCrashCode = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER)
+    {
+        return kXessCrashed;
+    }
+}
 
 bool Host::InitXess()
 {
@@ -1782,8 +1819,16 @@ bool Host::InitXess()
     for (const xess_quality_settings_t q : kQualities)
     {
         xess_2d_t optimal{}, lo{}, hi{};
-        if (x.OptimalInput(x.context, &outRes, q, &optimal, &lo, &hi) != XESS_RESULT_SUCCESS)
+        Log("XeSS: asking for the input size of quality setting %d", static_cast<int>(q));
+        const xess_result_t orc = SafeXessOptimal(x, &outRes, q, &optimal, &lo, &hi);
+        if (orc == kXessCrashed)
+        {
+            Log("XeSS: the runtime crashed (exception 0x%08x) while asking for sizes", g_xessCrashCode);
+            return false;
+        }
+        if (orc != XESS_RESULT_SUCCESS)
             continue;
+        Log("XeSS:   setting %d takes inputs %ux%u .. %ux%u (best %ux%u)", static_cast<int>(q), lo.x, lo.y, hi.x, hi.y, optimal.x, optimal.y);
         if (width_ >= lo.x && width_ <= hi.x && height_ >= lo.y && height_ <= hi.y)
         {
             quality = q;
@@ -1802,7 +1847,13 @@ bool Host::InitXess()
     ip.initFlags = XESS_INIT_FLAG_LDR_INPUT_COLOR | XESS_INIT_FLAG_RESPONSIVE_PIXEL_MASK; // the frame as the game shows it; our mask as the responsive one
     ip.creationNodeMask = 1;
     ip.visibleNodeMask = 1;
-    const xess_result_t rc = x.Init(x.context, &ip);
+    Log("XeSS: setting it up (quality %d)", static_cast<int>(quality));
+    const xess_result_t rc = SafeXessInit(x, &ip);
+    if (rc == kXessCrashed)
+    {
+        Log("XeSS: the runtime crashed (exception 0x%08x) while setting up", g_xessCrashCode);
+        return false;
+    }
     if (rc != XESS_RESULT_SUCCESS)
     {
         Log("XeSS: could not be set up (code %d)", static_cast<int>(rc));
@@ -1830,7 +1881,7 @@ bool Host::RecordXess(ID3D12Resource* curTex, bool reset)
     x.resetHistory = reset ? 1u : 0u;
     x.inputWidth = width_;
     x.inputHeight = height_;
-    const xess_result_t rc = xess_->Execute(xess_->context, list_.Get(), &x);
+    const xess_result_t rc = SafeXessExecute(*xess_, list_.Get(), &x);
     if (rc != XESS_RESULT_SUCCESS)
     {
         static int logged = 0;
@@ -1853,7 +1904,7 @@ void Host::ShutdownXess()
     xess_ = nullptr;
 }
 #else
-struct Host::XessApi
+struct XessApi
 {
 };
 bool Host::InitXess()
