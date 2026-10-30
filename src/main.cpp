@@ -62,6 +62,7 @@
 #include "nis_shader.h"
 #include "nis_config.h"
 #include "fsr_flow_shader.h"
+#include "fsr_flow2_shader.h" // Motion2 (optional experiment, see the file)
 #include "ffx_api/ffx_api.h"
 #include "ffx_api/ffx_upscale.h"
 #include "ffx_api/ffx_api_loader.h"
@@ -1482,7 +1483,15 @@ bool Host::InitFsrPipelines()
     }
     auto make = [&](const char* entry, ComPtr<ID3D12PipelineState>& pso) {
         ComPtr<ID3DBlob> cs, e;
-        const HRESULT h = D3DCompile(kFsrFlowHlsl, sizeof(kFsrFlowHlsl) - 1, "fsr_flow.hlsl", nullptr, nullptr, entry, "cs_5_0",
+        // Motion2: the block pass of fsr_flow_shader.h plus the steadier pixel pass of fsr_flow2_shader.h
+        std::string src(kFsrFlowHlsl);
+        if (st_.motion2)
+        {
+            const size_t cut = src.find("// ---- pass 2");
+            if (cut != std::string::npos)
+                src = src.substr(0, cut) + kFsrFlow2Pass2;
+        }
+        const HRESULT h = D3DCompile(src.c_str(), src.size(), "fsr_flow.hlsl", nullptr, nullptr, entry, "cs_5_0",
                                      D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &cs, &e);
         if (FAILED(h))
         {
@@ -1498,6 +1507,8 @@ bool Host::InitFsrPipelines()
             Log("FSR3/4: pipeline %s failed: 0x%08X", entry, static_cast<unsigned>(h2));
         return SUCCEEDED(h2);
     };
+    if (st_.motion2)
+        Log("FSR3/4: Motion 2 (steadier motion vectors) is on");
     return make("CSBlock", fsrBlockPso_) && make("CSPixel", fsrPixelPso_);
 }
 
