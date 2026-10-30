@@ -35,6 +35,7 @@ struct Settings
     UINT fpsCycleKey = VK_NEXT;  // FPS overlay type (FpsCycleShortcutKey)
     UINT fgKey = VK_END;         // frame generation on/off (FGShortcutKey)
     int presentMode = 3;      // 0 auto (FG on: no wait, FG off: VSync), 1 always interval 0, 2 always interval 1, 3 classic 2.2.0 behaviour, 4 Lossless-style (tearing, latency 1), 5 classic + exactly refresh/2 base frames, 6 classic + unlimited capture (no half-refresh limit)
+    int motion3 = 0;          // Motion3 experiment (fsr_flow3_shader.h): multi-scale motion vectors; [Upscale] Motion3
     int motion2 = 0;          // Motion2 experiment (fsr_flow2_shader.h): steadier motion vectors; [Upscale] Motion2
     int dlssPreset = 0;       // DLSS model (preset): 0 auto (L when upscaling, E at 1:1), 5 E, 10 J, 11 K, 12 L, 13 M; [Upscale] DlssPreset
     int upscale = 4;          // output scaling: 0 off, 1 bilinear, 2 FSR1 (EASU+RCAS), 3 NIS, 4 FSR3/4 (motion measured from the frames + AMD runtime); read at start
@@ -117,6 +118,7 @@ inline void LoadSettings(Settings& s)
     s.upscale = GetPrivateProfileIntW(L"Upscale", L"Method", 4, path.c_str());
     if (s.upscale < 0 || s.upscale > 5) s.upscale = 4;
     s.motion2 = GetPrivateProfileIntW(L"Upscale", L"Motion2", 0, path.c_str()) != 0 ? 1 : 0; // Motion2
+    s.motion3 = GetPrivateProfileIntW(L"Upscale", L"Motion3", 0, path.c_str()) != 0 ? 1 : 0; // Motion3
     s.dlssPreset = GetPrivateProfileIntW(L"Upscale", L"DlssPreset", 0, path.c_str());
     if (s.dlssPreset < 0 || s.dlssPreset > 16) s.dlssPreset = 0;
     s.upscaleLevel = GetPrivateProfileIntW(L"Upscale", L"Level", 0, path.c_str());
@@ -180,6 +182,7 @@ inline void SaveSettings(const Settings& s)
     WritePrivateProfileStringW(L"Upscale", L"Method", std::to_wstring(s.upscale).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Upscale", L"Level", std::to_wstring(s.upscaleLevel).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Upscale", L"Motion2", std::to_wstring(s.motion2).c_str(), path.c_str()); // Motion2
+    WritePrivateProfileStringW(L"Upscale", L"Motion3", std::to_wstring(s.motion3).c_str(), path.c_str()); // Motion3
     WritePrivateProfileStringW(L"Upscale", L"DlssPreset", std::to_wstring(s.dlssPreset).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Upscale", L"NisSharpness", std::to_wstring(s.nisSharp).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Upscale", L"LabelSeconds", std::to_wstring(s.labelSeconds).c_str(), path.c_str());

@@ -63,6 +63,7 @@
 #include "nis_config.h"
 #include "fsr_flow_shader.h"
 #include "fsr_flow2_shader.h" // Motion2 (optional experiment, see the file)
+#include "fsr_flow3_shader.h" // Motion3 (optional experiment, see the file)
 #include "ffx_api/ffx_api.h"
 #include "ffx_api/ffx_upscale.h"
 #include "ffx_api/ffx_api_loader.h"
@@ -511,6 +512,7 @@ class Host
     bool InitUpscale();
     bool CreateUpscaleViews();
     bool InitFsrPipelines();
+    bool InitMotion3Pipelines();
     bool InitFsrTemporal();
     void ReleaseFsrTemporal();
     void RecordFsrTemporal();
@@ -574,6 +576,13 @@ class Host
     ffxContext ffxCtx_ = nullptr;
     ComPtr<ID3D12RootSignature> fsrRoot_;
     ComPtr<ID3D12PipelineState> fsrBlockPso_, fsrPixelPso_;
+    // Motion3 (fsr_flow3_shader.h)
+    ComPtr<ID3D12RootSignature> fsr3Root_;
+    ComPtr<ID3D12PipelineState> fsr3Luma1_, fsr3Luma2_, fsr3Search2_, fsr3Refine1_, fsr3Block_;
+    ComPtr<ID3D12Resource> fsr3L1_[2], fsr3L2_[2], fsr3G2_, fsr3G1_;
+    bool fsr3Pipes_ = false;  // pipelines made
+    bool fsr3Ready_ = false;  // textures and descriptors made
+    UINT fsr3W1_ = 0, fsr3H1_ = 0, fsr3W2_ = 0, fsr3H2_ = 0;
     ComPtr<ID3D12Resource> fsrTex_[2], fsrBlk_, fsrMv_, fsrDepth_, fsrReact_, fsrOut_;
     bool fsrPipesOk_ = false;
     bool fsrReady_ = false;
@@ -1259,7 +1268,7 @@ bool Host::InitUpscale()
     // Descriptor heaps: SRV 0 = the captured picture, SRV 1 = the EASU result; RTV 0 = the EASU result, 1.. = back buffers.
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 17; // 0 captured picture, 1-2 NIS coefficients, 3 EASU result, 4 NIS output (UAV), 5 NIS output (SRV),
+    hd.NumDescriptors = 17 + 40; // (17-56: Motion3, 2 frame parities x 5 passes x 4) // 0 captured picture, 1-2 NIS coefficients, 3 EASU result, 4 NIS output (UAV), 5 NIS output (SRV),
                             // 6 temporal FSR output (SRV), 7-9 flow inputs (frame A, B, block vectors), 10-13 flow outputs (UAV: block vectors, vectors, depth, reactive mask), 14-16 flow inputs (B, A, block vectors)
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev12_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&upSrvHeap_))))
@@ -1453,6 +1462,7 @@ bool Host::InitUpscale()
 bool Host::InitFsrPipelines()
 {
     fsrRoot_.Reset();
+    fsr3Pipes_ = false;
     fsrBlockPso_.Reset();
     fsrPixelPso_.Reset();
     D3D12_DESCRIPTOR_RANGE ranges[2]{};
@@ -1485,7 +1495,7 @@ bool Host::InitFsrPipelines()
         ComPtr<ID3DBlob> cs, e;
         // Motion2: the block pass of fsr_flow_shader.h plus the steadier pixel pass of fsr_flow2_shader.h
         std::string src(kFsrFlowHlsl);
-        if (st_.motion2)
+        if (st_.motion2 || st_.motion3)
         {
             const size_t cut = src.find("// ---- pass 2");
             if (cut != std::string::npos)
@@ -1507,9 +1517,69 @@ bool Host::InitFsrPipelines()
             Log("FSR3/4: pipeline %s failed: 0x%08X", entry, static_cast<unsigned>(h2));
         return SUCCEEDED(h2);
     };
-    if (st_.motion2)
+    if (st_.motion2 || st_.motion3)
         Log("FSR3/4: Motion 2 (steadier motion vectors) is on");
-    return make("CSBlock", fsrBlockPso_) && make("CSPixel", fsrPixelPso_);
+    if (!(make("CSBlock", fsrBlockPso_) && make("CSPixel", fsrPixelPso_)))
+        return false;
+    fsr3Pipes_ = false;
+    if (st_.motion3)
+        fsr3Pipes_ = InitMotion3Pipelines();
+    return true;
+}
+
+// Motion3 (fsr_flow3_shader.h): its root signature (8 constants, 3 SRVs, 1 UAV) and the five passes. Any failure only means the old block
+// search is used instead.
+bool Host::InitMotion3Pipelines()
+{
+    fsr3Root_.Reset();
+    D3D12_DESCRIPTOR_RANGE ranges[2]{};
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[0].NumDescriptors = 3;
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    ranges[1].NumDescriptors = 1;
+    D3D12_ROOT_PARAMETER rp[3]{};
+    rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rp[0].Constants.Num32BitValues = 8;
+    rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rp[1].DescriptorTable.NumDescriptorRanges = 1;
+    rp[1].DescriptorTable.pDescriptorRanges = &ranges[0];
+    rp[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rp[2].DescriptorTable.NumDescriptorRanges = 1;
+    rp[2].DescriptorTable.pDescriptorRanges = &ranges[1];
+    D3D12_ROOT_SIGNATURE_DESC rsd{};
+    rsd.NumParameters = 3;
+    rsd.pParameters = rp;
+    ComPtr<ID3DBlob> sig, err;
+    if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
+        FAILED(dev12_->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&fsr3Root_))))
+    {
+        Log("FSR3/4: Motion 3 root signature failed (the old search is used)");
+        return false;
+    }
+    auto make = [&](const char* define, const char* entry, ComPtr<ID3D12PipelineState>& pso) {
+        ComPtr<ID3DBlob> cs, e;
+        const D3D_SHADER_MACRO defs[] = { { define, "1" }, { nullptr, nullptr } };
+        const HRESULT h = D3DCompile(kFsrFlow3Hlsl, sizeof(kFsrFlow3Hlsl) - 1, "fsr_flow3.hlsl", defs, nullptr, entry, "cs_5_0",
+                                     D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &cs, &e);
+        if (FAILED(h))
+        {
+            Log("FSR3/4: Motion 3 shader %s/%s failed: 0x%08X %s", define, entry, static_cast<unsigned>(h),
+                e ? static_cast<const char*>(e->GetBufferPointer()) : "");
+            return false;
+        }
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature = fsr3Root_.Get();
+        pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
+        return SUCCEEDED(dev12_->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso)));
+    };
+    const bool ok = make("PASS_LUMA1", "CSLuma", fsr3Luma1_) && make("PASS_LUMA2", "CSLuma", fsr3Luma2_) &&
+                    make("PASS_SEARCH2", "CSSearch2", fsr3Search2_) && make("PASS_REFINE1", "CSRefine", fsr3Refine1_) &&
+                    make("PASS_BLOCK", "CSRefine", fsr3Block_);
+    if (ok)
+        Log("FSR3/4: Motion 3 (multi-scale motion vectors) is on");
+    else
+        Log("FSR3/4: Motion 3 could not be built (the old search is used)");
+    return ok;
 }
 
 static void FfxMessage(uint32_t type, const wchar_t* message)
@@ -1531,6 +1601,8 @@ void Host::ReleaseFsrTemporal()
     ReleaseDlssFeature();
     fsrTex_[0].Reset();
     fsrTex_[1].Reset();
+    fsr3Ready_ = false;
+    fsr3L1_[0].Reset(); fsr3L1_[1].Reset(); fsr3L2_[0].Reset(); fsr3L2_[1].Reset(); fsr3G2_.Reset(); fsr3G1_.Reset();
     fsrBlk_.Reset();
     fsrMv_.Reset();
     fsrDepth_.Reset();
@@ -1650,6 +1722,48 @@ bool Host::InitFsrTemporal()
     srv(fsrTex_[1].Get(), kFormat, 14);
     srv(fsrTex_[0].Get(), kFormat, 15);
     srv(fsrBlk_.Get(), DXGI_FORMAT_R16G16_FLOAT, 16);
+
+    // Motion3: the brightness pyramid, the coarse vector grids, and the descriptor sets of its five passes (slots 17..56)
+    fsr3Ready_ = false;
+    if (fsr3Pipes_)
+    {
+        fsr3W1_ = (width_ + 1) / 2; fsr3H1_ = (height_ + 1) / 2;
+        fsr3W2_ = (fsr3W1_ + 1) / 2; fsr3H2_ = (fsr3H1_ + 1) / 2;
+        const UINT g1w = (fsr3W1_ + 3) / 4, g1h = (fsr3H1_ + 3) / 4, g2w = (fsr3W2_ + 3) / 4, g2h = (fsr3H2_ + 3) / 4;
+        const D3D12_RESOURCE_FLAGS uf = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        const bool okM3 = make(fsr3L1_[0], fsr3W1_, fsr3H1_, DXGI_FORMAT_R16_FLOAT, uf, nps) &&
+                          make(fsr3L1_[1], fsr3W1_, fsr3H1_, DXGI_FORMAT_R16_FLOAT, uf, nps) &&
+                          make(fsr3L2_[0], fsr3W2_, fsr3H2_, DXGI_FORMAT_R16_FLOAT, uf, nps) &&
+                          make(fsr3L2_[1], fsr3W2_, fsr3H2_, DXGI_FORMAT_R16_FLOAT, uf, nps) &&
+                          make(fsr3G2_, g2w, g2h, DXGI_FORMAT_R16G16_FLOAT, uf, nps) &&
+                          make(fsr3G1_, g1w, g1h, DXGI_FORMAT_R16G16_FLOAT, uf, nps);
+        if (okM3)
+        {
+            const DXGI_FORMAT lf = DXGI_FORMAT_R16_FLOAT, gf = DXGI_FORMAT_R16G16_FLOAT;
+            for (UINT p = 0; p < 2; ++p)
+            {
+                const UINT q = 1 - p;
+                ID3D12Resource* col[2] = { fsrTex_[p].Get(), fsrTex_[q].Get() };
+                // each set: three SRVs then one UAV
+                auto set = [&](UINT pass, ID3D12Resource* a, DXGI_FORMAT fa, ID3D12Resource* b, DXGI_FORMAT fb, ID3D12Resource* c,
+                               DXGI_FORMAT fc, ID3D12Resource* u, DXGI_FORMAT fu) {
+                    const UINT base = 17 + (p * 5 + pass) * 4;
+                    srv(a, fa, base); srv(b, fb, base + 1); srv(c, fc, base + 2); uav(u, fu, base + 3);
+                };
+                set(0, col[0], kFormat, col[0], kFormat, col[0], kFormat, fsr3L1_[p].Get(), lf);
+                set(1, fsr3L1_[p].Get(), lf, fsr3L1_[p].Get(), lf, fsr3L1_[p].Get(), lf, fsr3L2_[p].Get(), lf);
+                set(2, fsr3L2_[p].Get(), lf, fsr3L2_[q].Get(), lf, fsr3L2_[q].Get(), lf, fsr3G2_.Get(), gf);
+                set(3, fsr3L1_[p].Get(), lf, fsr3L1_[q].Get(), lf, fsr3G2_.Get(), gf, fsr3G1_.Get(), gf);
+                set(4, col[0], kFormat, col[1], kFormat, fsr3G1_.Get(), gf, fsrBlk_.Get(), gf);
+            }
+            fsr3Ready_ = true;
+        }
+        else
+        {
+            Log("FSR3/4: Motion 3 textures could not be made (the old search is used)");
+            fsr3L1_[0].Reset(); fsr3L1_[1].Reset(); fsr3L2_[0].Reset(); fsr3L2_[1].Reset(); fsr3G2_.Reset(); fsr3G1_.Reset();
+        }
+    }
 
     if (upMethod_ == 5)
     {
@@ -1934,10 +2048,43 @@ void Host::RecordFsrTemporal()
     list_->SetComputeRootDescriptorTable(1, slot(fsrCur_ == 0 ? 7 : 14)); // current frame, frame before, block vectors
     list_->SetComputeRootDescriptorTable(2, slot(10));
 
-    barrier(fsrBlk_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    list_->SetPipelineState(fsrBlockPso_.Get());
-    list_->Dispatch((bw + 7) / 8, (bh + 7) / 8, 1);
-    barrier(fsrBlk_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+    if (fsr3Ready_)
+    {
+        // Motion3: pyramid, coarse search, refinement, block vectors (fsr_flow3_shader.h); then back to the usual root signature
+        const UINT p = static_cast<UINT>(fsrCur_), q = 1 - p;
+        const UINT g1w = (fsr3W1_ + 3) / 4, g1h = (fsr3H1_ + 3) / 4, g2w = (fsr3W2_ + 3) / 4, g2h = (fsr3H2_ + 3) / 4;
+        const D3D12_RESOURCE_STATES uavS = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        list_->SetComputeRootSignature(fsr3Root_.Get());
+        auto pass = [&](UINT n, ID3D12PipelineState* pso, ID3D12Resource* out, UINT ow, UINT oh, UINT sw, UINT sh, UINT pw, UINT ph) {
+            const UINT c[8] = { ow, oh, sw, sh, pw, ph, 0, 0 };
+            list_->SetComputeRoot32BitConstants(0, 8, c, 0);
+            const UINT base = 17 + (p * 5 + n) * 4;
+            list_->SetComputeRootDescriptorTable(1, slot(base));
+            list_->SetComputeRootDescriptorTable(2, slot(base + 3));
+            barrier(out, nps, uavS);
+            list_->SetPipelineState(pso);
+            list_->Dispatch((ow + 7) / 8, (oh + 7) / 8, 1);
+            barrier(out, uavS, nps);
+        };
+        const UINT lw1 = fsr3W1_, lh1 = fsr3H1_, lw2 = fsr3W2_, lh2 = fsr3H2_;
+        pass(0, fsr3Luma1_.Get(), fsr3L1_[p].Get(), lw1, lh1, width_, height_, 0, 0);
+        pass(1, fsr3Luma2_.Get(), fsr3L2_[p].Get(), lw2, lh2, lw1, lh1, 0, 0);
+        pass(2, fsr3Search2_.Get(), fsr3G2_.Get(), g2w, g2h, lw2, lh2, 0, 0);
+        pass(3, fsr3Refine1_.Get(), fsr3G1_.Get(), g1w, g1h, lw1, lh1, g2w, g2h);
+        pass(4, fsr3Block_.Get(), fsrBlk_.Get(), bw, bh, width_, height_, g1w, g1h);
+        (void)q;
+        list_->SetComputeRootSignature(fsrRoot_.Get());
+        list_->SetComputeRoot32BitConstants(0, 4, consts, 0);
+        list_->SetComputeRootDescriptorTable(1, slot(fsrCur_ == 0 ? 7 : 14));
+        list_->SetComputeRootDescriptorTable(2, slot(10));
+    }
+    else
+    {
+        barrier(fsrBlk_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list_->SetPipelineState(fsrBlockPso_.Get());
+        list_->Dispatch((bw + 7) / 8, (bh + 7) / 8, 1);
+        barrier(fsrBlk_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+    }
 
     barrier(fsrMv_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     barrier(fsrDepth_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
