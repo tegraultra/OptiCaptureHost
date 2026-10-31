@@ -272,7 +272,7 @@ void CSBlock3(uint3 id : SV_DispatchThreadID)
         const float cc = BlockCostV1(win, org, d);
         if (cc < pickCost) { pickCost = cc; pick = d; }
     }
-    if (pickCost < 0.65 * oldBest)
+    if (oldBest > 2.0 && pickCost < 0.65 * oldBest) // only where the old search found no good match at all
     {
         // refine the winner by one pixel, then it is used
         best = pick;
