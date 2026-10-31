@@ -198,6 +198,8 @@ void CSRefine(uint3 id : SV_DispatchThreadID)
 // small price for motion), so it is as good as that one everywhere it was good. The coarse-size vectors (L1/L2 pyramid) are only extra
 // candidates, and one replaces the old search's result only if it matches at least 35% better (repeating texture, a fast turn the +-24
 // reach misses).
+// 0: the coarse candidates are never used (the result is exactly the old search). They blurred a patch behind the character in grass.
+static const int kUseCandidates = 0;
 float BlockCostV1(float win[64], int2 org, int2 d) { return Cost(win, org, d) * 64.0 + 0.08 * length(float2(d)); }
 
 [numthreads(8, 8, 1)]
@@ -275,7 +277,7 @@ void CSBlock3(uint3 id : SV_DispatchThreadID)
     // only where the old search found no good match at all, and the coarse blocks around agree with each other (one surface): beside a
     // character or an object's edge they disagree, and there the old search's own answer stays
     const float spread = max(max(length(v00 - blend), length(v10 - blend)), max(length(v01 - blend), length(v11 - blend)));
-    if (oldBest > 2.0 && spread < 3.0 && pickCost < 0.65 * oldBest)
+    if (kUseCandidates != 0 && oldBest > 2.0 && spread < 3.0 && pickCost < 0.65 * oldBest)
     {
         // refine the winner by one pixel, then it is used
         best = pick;
@@ -302,7 +304,17 @@ void CSBlock3(uint3 id : SV_DispatchThreadID)
     const float denomY = 2.0 * (cs[3] + cs[4] - 2.0 * cs[0]);
     const float subX = (abs(denomX) > 1e-4) ? clamp((cs[1] - cs[2]) / denomX, -0.45, 0.45) : 0.0;
     const float subY = (abs(denomY) > 1e-4) ? clamp((cs[3] - cs[4]) / denomY, -0.45, 0.45) : 0.0;
-    uOut[id.xy] = float2(best) + float2(subX, subY);
+    float2 outV = float2(best) + float2(subX, subY);
+    // Temporal steadiness: on repeating texture (floor, grass) several shifts match almost equally, and the search flips between them from
+    // one frame to the next - the vectors flicker and the upscaler shimmers. If the same block's vector of the frame before (tPar here)
+    // is within 6 pixels of the new one and matches about as well, it is kept.
+    const float2 pv = tPar.Load(int3(id.xy, 0));
+    if (length(pv - outV) > 0.05 && length(pv - outV) <= 6.0)
+    {
+        const float pvCost = BlockCostV1(win, org, int2(round(pv)));
+        if (pvCost <= bestCost * 1.08 + 0.4) outV = pv;
+    }
+    uOut[id.xy] = outV;
 }
 #endif
 #endif

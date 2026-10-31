@@ -1572,11 +1572,9 @@ bool Host::InitMotion3Pipelines()
         pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
         return SUCCEEDED(dev12_->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso)));
     };
-    const bool ok = make("PASS_LUMA1", "CSLuma", fsr3Luma1_) && make("PASS_LUMA2", "CSLuma", fsr3Luma2_) &&
-                    make("PASS_SEARCH2", "CSSearch2", fsr3Search2_) && make("PASS_REFINE1", "CSRefine", fsr3Refine1_) &&
-                    make("PASS_BLOCK", "CSBlock3", fsr3Block_);
+    const bool ok = make("PASS_BLOCK", "CSBlock3", fsr3Block_);
     if (ok)
-        Log("FSR3/4: Motion 3 (multi-scale motion vectors) is on");
+        Log("FSR3/4: Motion 3 (the old block search + temporal steadiness) is on");
     else
         Log("FSR3/4: Motion 3 could not be built (the old search is used)");
     return ok;
@@ -1727,34 +1725,16 @@ bool Host::InitFsrTemporal()
     fsr3Ready_ = false;
     if (fsr3Pipes_)
     {
-        fsr3W1_ = (width_ + 1) / 2; fsr3H1_ = (height_ + 1) / 2;
-        fsr3W2_ = (fsr3W1_ + 1) / 2; fsr3H2_ = (fsr3H1_ + 1) / 2;
-        const UINT g1w = (fsr3W1_ + 3) / 4, g1h = (fsr3H1_ + 3) / 4, g2w = (fsr3W2_ + 3) / 4, g2h = (fsr3H2_ + 3) / 4;
-        const D3D12_RESOURCE_FLAGS uf = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        const bool okM3 = make(fsr3L1_[0], fsr3W1_, fsr3H1_, DXGI_FORMAT_R16_FLOAT, uf, nps) &&
-                          make(fsr3L1_[1], fsr3W1_, fsr3H1_, DXGI_FORMAT_R16_FLOAT, uf, nps) &&
-                          make(fsr3L2_[0], fsr3W2_, fsr3H2_, DXGI_FORMAT_R16_FLOAT, uf, nps) &&
-                          make(fsr3L2_[1], fsr3W2_, fsr3H2_, DXGI_FORMAT_R16_FLOAT, uf, nps) &&
-                          make(fsr3G2_, g2w, g2h, DXGI_FORMAT_R16G16_FLOAT, uf, nps) &&
-                          make(fsr3G1_, g1w, g1h, DXGI_FORMAT_R16G16_FLOAT, uf, nps);
+        const bool okM3 = make(fsr3G1_, bw, bh, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, nps);
         if (okM3)
         {
-            const DXGI_FORMAT lf = DXGI_FORMAT_R16_FLOAT, gf = DXGI_FORMAT_R16G16_FLOAT;
+            // slot 17 + (p*5+4)*4: current frame, frame before, the block vectors of the frame before; and the block vectors written
+            const DXGI_FORMAT gf = DXGI_FORMAT_R16G16_FLOAT;
             for (UINT p = 0; p < 2; ++p)
             {
-                const UINT q = 1 - p;
-                ID3D12Resource* col[2] = { fsrTex_[p].Get(), fsrTex_[q].Get() };
-                // each set: three SRVs then one UAV
-                auto set = [&](UINT pass, ID3D12Resource* a, DXGI_FORMAT fa, ID3D12Resource* b, DXGI_FORMAT fb, ID3D12Resource* c,
-                               DXGI_FORMAT fc, ID3D12Resource* u, DXGI_FORMAT fu) {
-                    const UINT base = 17 + (p * 5 + pass) * 4;
-                    srv(a, fa, base); srv(b, fb, base + 1); srv(c, fc, base + 2); uav(u, fu, base + 3);
-                };
-                set(0, col[0], kFormat, col[0], kFormat, col[0], kFormat, fsr3L1_[p].Get(), lf);
-                set(1, fsr3L1_[p].Get(), lf, fsr3L1_[p].Get(), lf, fsr3L1_[p].Get(), lf, fsr3L2_[p].Get(), lf);
-                set(2, fsr3L2_[p].Get(), lf, fsr3L2_[q].Get(), lf, fsr3L2_[q].Get(), lf, fsr3G2_.Get(), gf);
-                set(3, fsr3L1_[p].Get(), lf, fsr3L1_[q].Get(), lf, fsr3G2_.Get(), gf, fsr3G1_.Get(), gf);
-                set(4, col[0], kFormat, col[1], kFormat, fsr3G1_.Get(), gf, fsrBlk_.Get(), gf);
+                const UINT base = 17 + (p * 5 + 4) * 4;
+                srv(fsrTex_[p].Get(), kFormat, base); srv(fsrTex_[1 - p].Get(), kFormat, base + 1); srv(fsr3G1_.Get(), gf, base + 2);
+                uav(fsrBlk_.Get(), gf, base + 3);
             }
             fsr3Ready_ = true;
         }
@@ -2050,29 +2030,24 @@ void Host::RecordFsrTemporal()
 
     if (fsr3Ready_)
     {
-        // Motion3: pyramid, coarse search, refinement, block vectors (fsr_flow3_shader.h); then back to the usual root signature
-        const UINT p = static_cast<UINT>(fsrCur_), q = 1 - p;
-        const UINT g1w = (fsr3W1_ + 3) / 4, g1h = (fsr3H1_ + 3) / 4, g2w = (fsr3W2_ + 3) / 4, g2h = (fsr3H2_ + 3) / 4;
+        // Motion3: the old block search plus temporal steadiness (fsr_flow3_shader.h); then back to the usual root signature
+        const UINT p = static_cast<UINT>(fsrCur_);
         const D3D12_RESOURCE_STATES uavS = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         list_->SetComputeRootSignature(fsr3Root_.Get());
-        auto pass = [&](UINT n, ID3D12PipelineState* pso, ID3D12Resource* out, UINT ow, UINT oh, UINT sw, UINT sh, UINT pw, UINT ph) {
-            const UINT c[8] = { ow, oh, sw, sh, pw, ph, 0, 0 };
-            list_->SetComputeRoot32BitConstants(0, 8, c, 0);
-            const UINT base = 17 + (p * 5 + n) * 4;
-            list_->SetComputeRootDescriptorTable(1, slot(base));
-            list_->SetComputeRootDescriptorTable(2, slot(base + 3));
-            barrier(out, nps, uavS);
-            list_->SetPipelineState(pso);
-            list_->Dispatch((ow + 7) / 8, (oh + 7) / 8, 1);
-            barrier(out, uavS, nps);
-        };
-        const UINT lw1 = fsr3W1_, lh1 = fsr3H1_, lw2 = fsr3W2_, lh2 = fsr3H2_;
-        pass(0, fsr3Luma1_.Get(), fsr3L1_[p].Get(), lw1, lh1, width_, height_, 0, 0);
-        pass(1, fsr3Luma2_.Get(), fsr3L2_[p].Get(), lw2, lh2, lw1, lh1, 0, 0);
-        pass(2, fsr3Search2_.Get(), fsr3G2_.Get(), g2w, g2h, lw2, lh2, 0, 0);
-        pass(3, fsr3Refine1_.Get(), fsr3G1_.Get(), g1w, g1h, lw1, lh1, g2w, g2h);
-        pass(4, fsr3Block_.Get(), fsrBlk_.Get(), bw, bh, width_, height_, g1w, g1h);
-        (void)q;
+        const UINT c3[8] = { bw, bh, width_, height_, bw, bh, 0, 0 };
+        list_->SetComputeRoot32BitConstants(0, 8, c3, 0);
+        const UINT base3 = 17 + (p * 5 + 4) * 4;
+        list_->SetComputeRootDescriptorTable(1, slot(base3));
+        list_->SetComputeRootDescriptorTable(2, slot(base3 + 3));
+        barrier(fsrBlk_.Get(), nps, uavS);
+        list_->SetPipelineState(fsr3Block_.Get());
+        list_->Dispatch((bw + 7) / 8, (bh + 7) / 8, 1);
+        // the vectors just made become "the frame before's" for the next frame
+        barrier(fsrBlk_.Get(), uavS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        barrier(fsr3G1_.Get(), nps, D3D12_RESOURCE_STATE_COPY_DEST);
+        list_->CopyResource(fsr3G1_.Get(), fsrBlk_.Get());
+        barrier(fsr3G1_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, nps);
+        barrier(fsrBlk_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, nps);
         list_->SetComputeRootSignature(fsrRoot_.Get());
         list_->SetComputeRoot32BitConstants(0, 4, consts, 0);
         list_->SetComputeRootDescriptorTable(1, slot(fsrCur_ == 0 ? 7 : 14));
