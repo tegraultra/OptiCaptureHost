@@ -8,7 +8,7 @@
 //      +-8 (+-32 real pixels);
 //   3) L1: each block starts from the vectors of the coarser blocks around it (their blend, their 3x3 median) and refines by +-2 with a
 //      small price for leaving the surroundings' guess (neighbours agree);
-//   4) the real picture: the OLD block search unchanged (fsr_flow_shader.h); the coarse vectors are only extra candidates that must win by 12%.
+//   4) the real picture: the OLD block search unchanged (fsr_flow_shader.h); the coarse vectors are only extra candidates that must win by 35%.
 // To remove it: delete this file, its #include, and everything marked "Motion3" in main.cpp / settings.h.
 #pragma once
 static const char kFsrFlow3Hlsl[] = R"HLSL(
@@ -196,7 +196,7 @@ void CSRefine(uint3 id : SV_DispatchThreadID)
 #if defined(PASS_BLOCK)
 // The real picture: EXACTLY the search of fsr_flow_shader.h (coarse +-24 step 6, then 3, then 1, then sub-pixel; same cost and the same
 // small price for motion), so it is as good as that one everywhere it was good. The coarse-size vectors (L1/L2 pyramid) are only extra
-// candidates, and one replaces the old search's result only if it matches at least 12% better (repeating texture, a fast turn the +-24
+// candidates, and one replaces the old search's result only if it matches at least 35% better (repeating texture, a fast turn the +-24
 // reach misses).
 float BlockCostV1(float win[64], int2 org, int2 d) { return Cost(win, org, d) * 64.0 + 0.08 * length(float2(d)); }
 
@@ -272,7 +272,7 @@ void CSBlock3(uint3 id : SV_DispatchThreadID)
         const float cc = BlockCostV1(win, org, d);
         if (cc < pickCost) { pickCost = cc; pick = d; }
     }
-    if (pickCost < 0.88 * oldBest)
+    if (pickCost < 0.65 * oldBest)
     {
         // refine the winner by one pixel, then it is used
         best = pick;
