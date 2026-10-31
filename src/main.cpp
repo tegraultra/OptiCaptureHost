@@ -1574,7 +1574,7 @@ bool Host::InitMotion3Pipelines()
     };
     const bool ok = make("PASS_LUMA1", "CSLuma", fsr3Luma1_) && make("PASS_LUMA2", "CSLuma", fsr3Luma2_) &&
                     make("PASS_SEARCH2", "CSSearch2", fsr3Search2_) && make("PASS_REFINE1", "CSRefine", fsr3Refine1_) &&
-                    make("PASS_BLOCK", "CSRefine", fsr3Block_);
+                    make("PASS_BLOCK", "CSBlock3", fsr3Block_);
     if (ok)
         Log("FSR3/4: Motion 3 (multi-scale motion vectors) is on");
     else
