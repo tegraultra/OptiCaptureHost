@@ -1501,7 +1501,8 @@ bool Host::InitFsrPipelines()
             if (cut != std::string::npos)
                 src = src.substr(0, cut) + kFsrFlow2Pass2;
         }
-        const HRESULT h = D3DCompile(src.c_str(), src.size(), "fsr_flow.hlsl", nullptr, nullptr, entry, "cs_5_0",
+        const D3D_SHADER_MACRO defs[] = { { "OC_MOTION_REACT", "1" }, { nullptr, nullptr } };
+        const HRESULT h = D3DCompile(src.c_str(), src.size(), "fsr_flow.hlsl", st_.motion3 ? defs : nullptr, nullptr, entry, "cs_5_0",
                                      D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &cs, &e);
         if (FAILED(h))
         {

@@ -94,6 +94,10 @@ void CSPixel(uint3 id : SV_DispatchThreadID)
     const float sad = max(bestCost, 0.0);
     float react = 0.8 * saturate((sad / 9.0 - 0.04) / 0.15);
     react = max(react, 0.5 * saturate((spread - 1.5) / 4.0)); // the vector is a guess: lean on this frame
+#ifdef OC_MOTION_REACT
+    // Motion3: the faster a pixel moves, the more the upscaler leans on this frame (FSR 3.1 smears its history over the whole picture in a turn)
+    react = max(react, 0.6 * saturate((length(best) - 3.0) / 12.0));
+#endif
     uReact[id.xy] = react;
 }
 )HLSL";
