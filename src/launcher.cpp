@@ -56,8 +56,8 @@ constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host'
 
 constexpr const wchar_t* kVersion = L"" OC_VER_STR;
 
-constexpr float kW = 915.0f; // client size in logical pixels (scaled by the DPI)
-constexpr float kH = 912.0f;
+constexpr float kW = 796.0f; // client size in logical pixels (scaled by the DPI)
+constexpr float kH = 804.0f;
 
 constexpr UINT_PTR kTimerList = 1;
 constexpr UINT_PTR kTimerHost = 2;
@@ -1397,7 +1397,7 @@ class App
     static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l);
     LRESULT OnMessage(UINT m, WPARAM w, LPARAM l);
 
-    float S(float v) const { return v * scale_ * 0.9775f; }
+    float S(float v) const { return v * scale_ * 0.85f; }
     // DPI scale, made smaller when the window would not fit the height of the screen (taskbar excluded)
     float ScaleFor(UINT dpi, HWND wnd) const
     {
@@ -1792,16 +1792,16 @@ void App::MakeFonts()
     { return std::make_unique<gp::Font>(family, S(px), style, gp::UnitPixel); };
 
     const int regular = gp::FontStyleRegular;
-    f_.title = mk(L"Segoe UI Semibold", 23.0f, regular);
-    f_.h2 = mk(L"Segoe UI Semibold", 15.0f, regular);
-    f_.body = mk(L"Segoe UI", 13.5f, regular);
-    f_.bodyB = mk(L"Segoe UI Semibold", 14.0f, regular);
-    f_.sm = mk(L"Segoe UI", 12.0f, regular);
-    f_.tiny = mk(L"Segoe UI", 11.0f, regular);
-    f_.link = mk(L"Segoe UI Semibold", 13.0f, gp::FontStyleUnderline);
-    f_.linkN = mk(L"Segoe UI Semibold", 13.0f, regular);
-    f_.btn = mk(L"Segoe UI Semibold", 15.0f, regular);
-    f_.chip = mk(L"Segoe UI Semibold", 12.5f, regular);
+    f_.title = mk(L"Segoe UI Semibold", 24.0f, regular);
+    f_.h2 = mk(L"Segoe UI Semibold", 16.5f, regular);
+    f_.body = mk(L"Segoe UI", 15.0f, regular);
+    f_.bodyB = mk(L"Segoe UI Semibold", 15.5f, regular);
+    f_.sm = mk(L"Segoe UI", 13.5f, regular);
+    f_.tiny = mk(L"Segoe UI", 12.0f, regular);
+    f_.link = mk(L"Segoe UI Semibold", 14.5f, gp::FontStyleUnderline);
+    f_.linkN = mk(L"Segoe UI Semibold", 14.5f, regular);
+    f_.btn = mk(L"Segoe UI Semibold", 16.5f, regular);
+    f_.chip = mk(L"Segoe UI Semibold", 14.0f, regular);
 }
 
 void App::ApplyDpi(UINT dpi, const RECT* suggested)
@@ -3300,18 +3300,17 @@ void App::OnClick(int id)
     }
     else if (id == kIdMotionSelect)
     {
-        static const wchar_t* mv[] = { L"Version 1  (the old block search)", L"Version 2  (steadier per-pixel vectors)",
-                                       L"Version 3  (old search + temporal steadiness, recommended)" };
+        static const wchar_t* mv[] = { L"Version 1  (the old block search)", L"", L"Version 3  (old search + temporal steadiness, recommended)" };
         HMENU menu = CreatePopupMenu();
         if (menu)
         {
-            for (int v = 1; v <= 3; ++v)
+            for (int v = 1; v <= 3; v += 2)
                 AppendMenuW(menu, MF_STRING | (st_.motionVer == v ? MF_CHECKED : 0), kMotionMenuBase + v, mv[v - 1]);
             POINT pt{};
             GetCursorPos(&pt);
             const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
             DestroyMenu(menu);
-            if (cmd >= kMotionMenuBase + 1 && cmd <= kMotionMenuBase + 3)
+            if (cmd == kMotionMenuBase + 1 || cmd == kMotionMenuBase + 3)
             {
                 st_.motionVer = static_cast<int>(cmd - kMotionMenuBase);
                 Save();
@@ -4021,13 +4020,13 @@ void App::Paint(HDC dc, int W, int H)
     // ---- motion vector version (FSR3/4 and DLSS output scaling) ----
     {
         const bool used = st_.upscale >= 4;
-        Text(g, L"Motion vectors", *f_.bodyB, R(44, 829, 130, 24), used ? col::Text() : col::Muted());
-        const gp::RectF selector = R(176, 824, 328, 30);
+        Text(g, L"Motion vectors", *f_.bodyB, R(44, 831, 130, 24), used ? col::Text() : col::Muted());
+        const gp::RectF selector = R(176, 827, 328, 30);
         const bool hot = hover_ == kIdMotionSelect;
         FillRound(g, selector, S(8), hot ? col::RowHot() : col::Row());
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
-        static const wchar_t* mvShort[] = { L"Version 1  (old)", L"Version 2", L"Version 3  (recommended)" };
-        Text(g, mvShort[(st_.motionVer >= 1 && st_.motionVer <= 3) ? st_.motionVer - 1 : 2], *f_.chip, R(186, 828, 308, 22),
+        static const wchar_t* mvShort[] = { L"Version 1  (old)", L"Version 3  (recommended)", L"Version 3  (recommended)" };
+        Text(g, mvShort[(st_.motionVer >= 1 && st_.motionVer <= 3) ? st_.motionVer - 1 : 2], *f_.chip, R(186, 831, 308, 22),
              used ? col::Text() : col::Muted());
         AddHit(selector, kIdMotionSelect);
     }
@@ -4347,11 +4346,11 @@ void App::Paint(HDC dc, int W, int H)
     // ---- footer ----
     {
         gp::Pen line(col::Line(), max(1.0f, S(1)));
-        g.DrawLine(&line, S(24), S(822), S(912), S(822));
+        g.DrawLine(&line, S(24), S(862), S(912), S(862));
 
         // Links panel: a framed card with four chips (icon, small label, value).
         {
-            const gp::RectF panel = R(24, 856, 626, 42);
+            const gp::RectF panel = R(24, 896, 626, 42);
             Card(g, panel);
             struct LinkChip { const wchar_t* label; const wchar_t* value; float x; float w; int id; bool heart; };
             static const LinkChip chips[] = {
@@ -4362,17 +4361,17 @@ void App::Paint(HDC dc, int W, int H)
             };
             for (const LinkChip& c : chips)
             {
-                const gp::RectF chip = R(c.x, 860, c.w, 34);
+                const gp::RectF chip = R(c.x, 900, c.w, 34);
                 const bool hot = hover_ == c.id;
                 const gp::Color tone = c.heart ? gp::Color(255, 255, 110, 140) : col::Accent();
                 FillRound(g, chip, S(9), hot ? col::Alpha(tone, 46) : col::Row());
                 StrokeRound(g, chip, S(9), hot ? tone : col::Line(), max(1.0f, S(1)));
                 if (c.heart)
-                    DrawHeart(g, R(c.x + 8, 866, 22, 22));
+                    DrawHeart(g, R(c.x + 8, 906, 22, 22));
                 else
-                    DrawPlane(g, R(c.x + 8, 866, 22, 22));
-                Text(g, c.label, *f_.tiny, R(c.x + 36, 862, c.w - 40, 14), col::Muted());
-                Text(g, c.value, hot ? *f_.link : *f_.linkN, R(c.x + 36, 874, c.w - 40, 18), hot ? (c.heart ? tone : col::Accent2()) : tone);
+                    DrawPlane(g, R(c.x + 8, 906, 22, 22));
+                Text(g, c.label, *f_.tiny, R(c.x + 36, 902, c.w - 40, 14), col::Muted());
+                Text(g, c.value, hot ? *f_.link : *f_.linkN, R(c.x + 36, 914, c.w - 40, 18), hot ? (c.heart ? tone : col::Accent2()) : tone);
                 AddHit(chip, c.id);
             }
         }
@@ -4398,10 +4397,10 @@ void App::Paint(HDC dc, int W, int H)
         {
             status = L"Pick a game from the list to begin.";
         }
-        Text(g, status, *f_.sm, R(24, 828, 640, 28), tone, 0, true);
+        Text(g, status, *f_.sm, R(24, 868, 640, 28), tone, 0, true);
 
         const bool noPick = !running && (selected_ < 0 || selected_ >= static_cast<int>(games_.size()));
-        Button(g, R(672, 852, 240, 46), running ? (stopping_ ? L"STOPPING\u2026" : L"STOP") : L"START", noPick, running);
+        Button(g, R(672, 892, 240, 46), running ? (stopping_ ? L"STOPPING\u2026" : L"STOP") : L"START", noPick, running);
     }
 
     // ---- warning dialog (on top of everything) ----

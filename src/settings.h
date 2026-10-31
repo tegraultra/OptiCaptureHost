@@ -120,7 +120,7 @@ inline void LoadSettings(Settings& s)
     if (s.upscale < 0 || s.upscale > 5) s.upscale = 4;
     s.motion2 = GetPrivateProfileIntW(L"Upscale", L"Motion2", 0, path.c_str()) != 0 ? 1 : 0; // Motion2
     s.motionVer = GetPrivateProfileIntW(L"Upscale", L"MotionVersion", 3, path.c_str());
-    if (s.motionVer < 1 || s.motionVer > 3) s.motionVer = 3;
+    if (s.motionVer != 1) s.motionVer = 3; // version 2 was removed
     s.motion2 = s.motionVer == 2 ? 1 : 0; // Motion2
     s.motion3 = s.motionVer == 3 ? 1 : 0; // Motion3
     s.dlssPreset = GetPrivateProfileIntW(L"Upscale", L"DlssPreset", 0, path.c_str());
