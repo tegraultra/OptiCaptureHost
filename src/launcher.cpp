@@ -1479,7 +1479,7 @@ class App
     bool PresetActive(int k) const
     {
         return st_.frameGenMode == PresetFg(k) && st_.mfgCount == PresetMfg(k) && st_.limitFps == PresetLimit(k) && st_.limitAuto == 1 && st_.limitTarget != 0 &&
-               st_.presentMode == 6 && st_.upscale == (k >= 4 ? 2 : 5) && st_.upscaleLevel == 0;
+               st_.presentMode == 6 && st_.upscale == (k >= 1 ? 2 : 5) && st_.upscaleLevel == (k >= 1 && k <= 3 ? 3 : 0);
     }
     void ApplyPreset(int k)
     {
@@ -1491,12 +1491,10 @@ class App
             st_.limitTarget = 1; // the game's own profile
         st_.presentMode = 6;
         // new GPU modes: Output scaling with DLSS on Quality; old GPU modes: FSR 1 on Quality (the game window is made smaller at START)
-        st_.upscale = k >= 4 ? 2 : 5;
-        st_.upscaleLevel = 0;
-        if (st_.upscale == 5)
-            st_.upscalerMode = 4; // Opti Upscaler: FSR 4.1.2 whenever DLSS or FSR3/4 output scaling is on
-        else
-            st_.upscalerMode = 1; // old GPU modes: Opti Upscaler FSR 3.1.5
+        // NO FG: DLSS Quality; new GPU modes (x2 / x3 / x4): FSR 1 Native; old GPU modes: FSR 1 Quality
+        st_.upscale = k >= 1 ? 2 : 5;
+        st_.upscaleLevel = (k >= 1 && k <= 3) ? 3 : 0;
+        st_.upscalerMode = k >= 4 ? 1 : 4; // Opti Upscaler: FSR 3.1.5 for the old GPU modes, FSR 4.1.2 for the others
         Save();
         static const wchar_t* const names[] = { L"NO FG MOD", L"x2 FG MOD (NEW GPU)", L"x3 FG MOD (NEW GPU)", L"x4 FG MOD (NEW GPU)",
                                                 L"x2 FG MOD (OLD GPU)", L"x3 FG MOD (OLD GPU)", L"x4 FG MOD (OLD GPU)" };
