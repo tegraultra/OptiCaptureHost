@@ -3424,7 +3424,7 @@ void App::OnClick(int id)
                 {
                     WritePrivateProfileStringW(L"FSR", L"UpscalerIndex", L"1", iniPath.c_str());
                 }
-                else if (st_.upscalerMode == 1)
+                else if (st_.upscalerMode == 1 || st_.upscalerMode == 5) // FSR 3.1.5 and DittoSR: index 2
                 {
                     WritePrivateProfileStringW(L"FSR", L"UpscalerIndex", L"2", iniPath.c_str());
                 }
