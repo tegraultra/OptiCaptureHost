@@ -56,8 +56,8 @@ constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host'
 
 constexpr const wchar_t* kVersion = L"" OC_VER_STR;
 
-constexpr float kW = 796.0f; // client size in logical pixels (scaled by the DPI)
-constexpr float kH = 770.0f;
+constexpr float kW = 915.0f; // client size in logical pixels (scaled by the DPI)
+constexpr float kH = 912.0f;
 
 constexpr UINT_PTR kTimerList = 1;
 constexpr UINT_PTR kTimerHost = 2;
@@ -100,6 +100,8 @@ constexpr int kIdUpResize = 32;
 constexpr int kIdUpSlider = 33;
 constexpr int kIdProfSlot0 = 34; // 34..37: profile slots 1..4
 constexpr int kIdProfileLoad = 38;
+constexpr int kIdMotionSelect = 39;
+constexpr int kMotionMenuBase = 6000;
 constexpr int kIdPreset0 = 40; // 40..46: quick modes NO FG, x2 / x3 / x4 (new GPU: Intel MFG), x2 / x3 / x4 (old GPU: Artur)
 constexpr int kUpMenuBase = 5900;
 const wchar_t* const kFgNames[11] = {
@@ -1395,7 +1397,7 @@ class App
     static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l);
     LRESULT OnMessage(UINT m, WPARAM w, LPARAM l);
 
-    float S(float v) const { return v * scale_ * 0.85f; }
+    float S(float v) const { return v * scale_ * 0.9775f; }
     // DPI scale, made smaller when the window would not fit the height of the screen (taskbar excluded)
     float ScaleFor(UINT dpi, HWND wnd) const
     {
@@ -1477,7 +1479,7 @@ class App
     bool PresetActive(int k) const
     {
         return st_.frameGenMode == PresetFg(k) && st_.mfgCount == PresetMfg(k) && st_.limitFps == PresetLimit(k) && st_.limitAuto == 1 && st_.limitTarget != 0 &&
-               st_.presentMode == 6 && st_.upscale == 5 && st_.upscaleLevel == 0;
+               st_.presentMode == 6 && st_.upscale == (k >= 4 ? 2 : 5) && st_.upscaleLevel == 0;
     }
     void ApplyPreset(int k)
     {
@@ -1488,14 +1490,18 @@ class App
         if (st_.limitTarget == 0)
             st_.limitTarget = 1; // the game's own profile
         st_.presentMode = 6;
-        // every mode: Output scaling with DLSS on Quality (the game window is made smaller at START)
-        st_.upscale = 5;
+        // new GPU modes: Output scaling with DLSS on Quality; old GPU modes: FSR 1 on Quality (the game window is made smaller at START)
+        st_.upscale = k >= 4 ? 2 : 5;
         st_.upscaleLevel = 0;
+        if (st_.upscale == 5)
+            st_.upscalerMode = 4; // Opti Upscaler: FSR 4.1.2 whenever DLSS or FSR3/4 output scaling is on
         Save();
         static const wchar_t* const names[] = { L"NO FG MOD", L"x2 FG MOD (NEW GPU)", L"x3 FG MOD (NEW GPU)", L"x4 FG MOD (NEW GPU)",
                                                 L"x2 FG MOD (OLD GPU)", L"x3 FG MOD (OLD GPU)", L"x4 FG MOD (OLD GPU)" };
         SetNote(std::wstring(names[k]) + L": limiter, present mode and frame generation set.", Note::Ok);
         OnClick(kIdFrameGenApply); // writes OptiScaler.ini for the chosen frame generation (and the picture upscaler when output scaling is on)
+        if (st_.upscale >= 4)
+            OnClick(kIdUpscalerApply);
     }
     gp::RectF upSliderRect_{};
     bool upSliding_ = false;
@@ -3279,12 +3285,37 @@ void App::OnClick(int id)
                 const Entry& e = entries[static_cast<int>(cmd) - kUpMenuBase - 1];
                 st_.upscale = e.method;
                 st_.upscaleLevel = e.level;
+                if (st_.upscale >= 4)
+                    st_.upscalerMode = 4; // Opti Upscaler: FSR 4.1.2 whenever DLSS or FSR3/4 output scaling is on
                 Save();
                 OnClick(kIdPictureOn); // the upscaler on the picture goes on with it
+                if (st_.upscale >= 4)
+                    OnClick(kIdUpscalerApply);
                 ReadPictureState();
                 SetNote(e.level == 3 ? L"Native: the game keeps its size and FSR only smooths the picture. \"Run the upscaler on the picture\" was turned on too."
                                      : L"START makes the game window that small and scales it up. \"Run the upscaler on the picture\" was turned on too.",
                         Note::Info);
+            }
+        }
+    }
+    else if (id == kIdMotionSelect)
+    {
+        static const wchar_t* mv[] = { L"Version 1  (the old block search)", L"Version 2  (steadier per-pixel vectors)",
+                                       L"Version 3  (old search + temporal steadiness, recommended)" };
+        HMENU menu = CreatePopupMenu();
+        if (menu)
+        {
+            for (int v = 1; v <= 3; ++v)
+                AppendMenuW(menu, MF_STRING | (st_.motionVer == v ? MF_CHECKED : 0), kMotionMenuBase + v, mv[v - 1]);
+            POINT pt{};
+            GetCursorPos(&pt);
+            const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
+            DestroyMenu(menu);
+            if (cmd >= kMotionMenuBase + 1 && cmd <= kMotionMenuBase + 3)
+            {
+                st_.motionVer = static_cast<int>(cmd - kMotionMenuBase);
+                Save();
+                SetNote(std::wstring(L"Motion vectors: ") + mv[st_.motionVer - 1] + (Running() ? L". Applies the next time you press START." : L"."), Note::Ok);
             }
         }
     }
@@ -3381,16 +3412,9 @@ void App::OnClick(int id)
                 if (st_.upscalerMode == 1)
                 {
                     WritePrivateProfileStringW(L"FSR", L"UpscalerIndex", L"2", iniPath.c_str());
-                    // less smearing of the history in motion (the reactive mask counts three times, shading changes twice, less accumulation on disocclusion)
-                    WritePrivateProfileStringW(L"FSR", L"ReactiveScale", L"3.000000", iniPath.c_str());
-                    WritePrivateProfileStringW(L"FSR", L"ShadingScale", L"2.000000", iniPath.c_str());
-                    WritePrivateProfileStringW(L"FSR", L"AccAddPerFrame", L"0.200000", iniPath.c_str());
                 }
                 else if (st_.upscalerMode == 4)
                 {
-                    WritePrivateProfileStringW(L"FSR", L"ReactiveScale", L"auto", iniPath.c_str());
-                    WritePrivateProfileStringW(L"FSR", L"ShadingScale", L"auto", iniPath.c_str());
-                    WritePrivateProfileStringW(L"FSR", L"AccAddPerFrame", L"auto", iniPath.c_str());
                     WritePrivateProfileStringW(L"FSR", L"UpscalerIndex", L"auto", iniPath.c_str());
                     WritePrivateProfileStringW(L"Sharpness", L"OverrideSharpness", L"true", iniPath.c_str());
                     WritePrivateProfileStringW(L"Sharpness", L"Sharpness", L"0.600000", iniPath.c_str());
@@ -3992,6 +4016,20 @@ void App::Paint(HDC dc, int W, int H)
         Text(g, L"Resize", *f_.chip, rb, pick ? col::Text() : col::Muted(), 1);
         if (pick)
             AddHit(rb, kIdUpResize);
+    }
+
+    // ---- motion vector version (FSR3/4 and DLSS output scaling) ----
+    {
+        const bool used = st_.upscale >= 4;
+        Text(g, L"Motion vectors", *f_.bodyB, R(44, 829, 130, 24), used ? col::Text() : col::Muted());
+        const gp::RectF selector = R(176, 824, 328, 30);
+        const bool hot = hover_ == kIdMotionSelect;
+        FillRound(g, selector, S(8), hot ? col::RowHot() : col::Row());
+        StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
+        static const wchar_t* mvShort[] = { L"Version 1  (old)", L"Version 2", L"Version 3  (recommended)" };
+        Text(g, mvShort[(st_.motionVer >= 1 && st_.motionVer <= 3) ? st_.motionVer - 1 : 2], *f_.chip, R(186, 828, 308, 22),
+             used ? col::Text() : col::Muted());
+        AddHit(selector, kIdMotionSelect);
     }
 
     // ---- sharpness slider (FSR 1: RCAS, NIS: sharpness); bilinear has none ----
