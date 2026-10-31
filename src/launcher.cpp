@@ -2839,8 +2839,16 @@ void App::OnClick(int id)
             st_.presentDelay = 0;  // reset values: no present delay,
             st_.presentMode = 0;   // Auto present mode,
             st_.upscalerMode = 1;  // AMD FSR 3.1.5
+            st_.optiFps = 0;       // "OptiScaler fps = Hz" unchecked,
+            vsyncMode_ = 0;        // VSync off
             Save();
             WriteOptiScalerKeys(st_);
+            {
+                const std::wstring ini = oc::ExeDir() + L"OptiScaler.ini";
+                if (GetFileAttributesW(ini.c_str()) != INVALID_FILE_ATTRIBUTES)
+                    WritePrivateProfileStringW(L"Framerate", L"FramerateLimit", L"0.000000", ini.c_str());
+            }
+            ApplyVsyncToOptiScaler();
             RegisterShowHotkey();
             OnClick(kIdFrameGenApply);
             OnClick(kIdUpscalerApply);
@@ -3369,6 +3377,8 @@ void App::OnClick(int id)
                 kUpscalerMenuBase + 3, L"DLSS 3.7  (AMD and GTX 16 cards)");
             AppendMenuW(menu, MF_STRING | (st_.upscalerMode == 4 ? MF_CHECKED : 0),
                 kUpscalerMenuBase + 4, L"AMD FSR 4.1.2");
+            AppendMenuW(menu, MF_STRING | (st_.upscalerMode == 5 ? MF_CHECKED : 0),
+                kUpscalerMenuBase + 5, L"DittoSR");
 
             POINT pt{};
             GetCursorPos(&pt);
@@ -3377,29 +3387,25 @@ void App::OnClick(int id)
                 pt.x, pt.y, 0, hwnd_, nullptr);
             DestroyMenu(menu);
 
-            if (cmd >= kUpscalerMenuBase && cmd <= kUpscalerMenuBase + 4)
+            if (cmd >= kUpscalerMenuBase && cmd <= kUpscalerMenuBase + 5)
             {
                 st_.upscalerMode = static_cast<int>(cmd - kUpscalerMenuBase);
                 Save();
 
-                static const wchar_t* names[] = {
-                    L"Intel XeSS", L"AMD FSR 3.1.5", L"NVIDIA DLSS", L"DLSS 3.7 (AMD / GTX 16)", L"AMD FSR 4.1.2"
-                };
-                SetNote(std::wstring(L"Selected: ") + names[st_.upscalerMode] +
-                    L". Press Apply to write OptiScaler.ini.", Note::Ok);
+                OnClick(kIdUpscalerApply); // selecting applies it: OptiScaler.ini is written and the folder's files are copied
             }
         }
     }
     else if (id == kIdUpscalerApply)
     {
-        if (st_.upscalerMode < 0 || st_.upscalerMode > 4)
+        if (st_.upscalerMode < 0 || st_.upscalerMode > 5)
         {
             SetNote(L"Invalid Upscaler selection.", Note::Error);
         }
         else
         {
             static const wchar_t* values[] = {
-                L"xess", L"ffx", L"dlss", L"ffx" /* DLSS 3.7 for AMD / GTX 16 runs on the FSR upscaler */, L"ffx"
+                L"xess", L"ffx", L"dlss", L"ffx" /* DLSS 3.7 for AMD / GTX 16 runs on the FSR upscaler */, L"ffx", L"ffx" /* DittoSR */
             };
             const std::wstring iniPath = oc::ExeDir() + L"OptiScaler.ini";
 
@@ -3422,12 +3428,14 @@ void App::OnClick(int id)
                 }
 
                 // FSR 3.1.5, FSR 4.1.2 and DLSS 3.7: also put the ready-made DLL set of that folder into the MK-JH folder.
-                if (st_.upscalerMode == 1 || st_.upscalerMode == 3 || st_.upscalerMode == 4)
+                if (st_.upscalerMode == 1 || st_.upscalerMode == 3 || st_.upscalerMode == 4 || st_.upscalerMode == 5)
                 {
+                    const bool ditto = st_.upscalerMode == 5;
                     const bool fsr = st_.upscalerMode == 1 || st_.upscalerMode == 4;
-                    const std::vector<std::wstring> names = fsr
-                        ? std::vector<std::wstring>{ L"FSR 4", L"FSR4", L"FSR_4", L"FSR-4" }
-                        : std::vector<std::wstring>{ L"Dlss 3.7", L"Dlss3.7", L"Dlss_3.7", L"Dlss-3.7" };
+                    const std::vector<std::wstring> names = ditto
+                        ? std::vector<std::wstring>{ L"DittoSR", L"Ditto SR", L"DittoSR_", L"Ditto" }
+                        : (fsr ? std::vector<std::wstring>{ L"FSR 4", L"FSR4", L"FSR_4", L"FSR-4" }
+                               : std::vector<std::wstring>{ L"Dlss 3.7", L"Dlss3.7", L"Dlss_3.7", L"Dlss-3.7" });
                     const std::wstring root = oc::ExeDir();
                     std::wstring from;
                     for (const std::wstring& n : names)
@@ -3445,7 +3453,7 @@ void App::OnClick(int id)
                         if (!from.empty())
                             break;
                     }
-                    const std::wstring label = fsr ? L"FSR 4" : L"Dlss 3.7";
+                    const std::wstring label = ditto ? L"DittoSR" : (fsr ? L"FSR 4" : L"Dlss 3.7");
                     if (from.empty())
                     {
                         SetNote(L"OptiScaler.ini updated, but the \"" + label + L"\" folder was not found (next to the launcher or inside MK-JH).", Note::Error);
@@ -4258,7 +4266,8 @@ void App::Paint(HDC dc, int W, int H)
                 L"AMD FSR 3.1.5",
                 L"NVIDIA DLSS",
                 L"DLSS 3.7  (AMD / GTX 16)",
-                L"AMD FSR 4.1.2"
+                L"AMD FSR 4.1.2",
+                L"DittoSR"
             };
 
             Text(g, L"Opti Upscaler", *f_.bodyB,
@@ -4269,7 +4278,7 @@ void App::Paint(HDC dc, int W, int H)
             FillRound(g, selector, S(8), selectorHot ? col::RowHot() : col::Row());
             StrokeRound(g, selector, S(8),
                 selectorHot ? col::Accent() : col::Line(), max(1.0f, S(1)));
-            Text(g, upscalerNames[(st_.upscalerMode >= 0 && st_.upscalerMode <= 4)
+            Text(g, upscalerNames[(st_.upscalerMode >= 0 && st_.upscalerMode <= 5)
                 ? st_.upscalerMode : 0], *f_.chip,
                 R(568, 478, 214, 22), locked ? col::Muted() : col::Text());
             if (!locked)

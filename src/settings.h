@@ -29,7 +29,7 @@ struct Settings
 {
     bool vsync = true;
     int frameGenMode = 0; // 0=XeFG, 1=DLSSG, 2=nofg, 3=fsrfg, 5=Combo MFG, 6=Nukem FG, 7=FSR3-4 FG, 8=Nvidia MFG (folders next to the program), 4=Intel FG profile (OptiScaler.ini from the "intel FG" folder)
-    int upscalerMode = 0; // 0=xess, 1=ffx, 2=dlss, 3=dlss 3.7 (AMD / GTX 16), 4=fsr 4.1.2
+    int upscalerMode = 0; // 0=xess, 1=ffx, 2=dlss, 3=dlss 3.7 (AMD / GTX 16), 4=fsr 4.1.2, 5=DittoSR
     UINT menuKey = VK_INSERT; // OptiScaler menu key (OptiScaler.ini [Menu] ShortcutKey)
     UINT fpsKey = VK_PRIOR;      // FPS overlay on/off (FpsShortcutKey)
     UINT fpsCycleKey = VK_NEXT;  // FPS overlay type (FpsCycleShortcutKey)
@@ -112,7 +112,7 @@ inline void LoadSettings(Settings& s)
     if (s.mfgCount < 0 || s.mfgCount > 5) s.mfgCount = 0;
 
     s.upscalerMode = GetPrivateProfileIntW(L"Settings", L"UpscalerMode", 0, path.c_str());
-    if (s.upscalerMode < 0 || s.upscalerMode > 4) s.upscalerMode = 0;
+    if (s.upscalerMode < 0 || s.upscalerMode > 5) s.upscalerMode = 0;
 
     s.presentMode = GetPrivateProfileIntW(L"Advanced", L"PresentMode", 3, path.c_str());
     if (s.presentMode < 0 || s.presentMode > 6) s.presentMode = 3;
