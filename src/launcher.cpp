@@ -1490,6 +1490,9 @@ class App
         if (st_.limitTarget == 0)
             st_.limitTarget = 1; // the game's own profile
         st_.presentMode = 6;
+        st_.optiFps = 1; // "OptiScaler fps = Hz" goes on with every profile
+        vsyncMode_ = -1; // VSync goes to Auto
+        ApplyVsyncToOptiScaler();
         // every mode: Output scaling off
         st_.upscale = 0;
         Save();
@@ -2895,6 +2898,9 @@ void App::OnClick(int id)
             if (cmd >= kFgMenuBase && cmd <= kFgMenuBase + 10)
             {
                 st_.frameGenMode = static_cast<int>(cmd - kFgMenuBase);
+                st_.optiFps = 1; // "OptiScaler fps = Hz" goes on with every frame generation choice
+                vsyncMode_ = -1; // and VSync goes to Auto
+                ApplyVsyncToOptiScaler();
                 Save();
 
 
