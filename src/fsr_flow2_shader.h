@@ -96,7 +96,7 @@ void CSPixel(uint3 id : SV_DispatchThreadID)
     react = max(react, 0.5 * saturate((spread - 1.5) / 4.0)); // the vector is a guess: lean on this frame
 #ifdef OC_MOTION_REACT
     // Motion3: the faster a pixel moves, the more the upscaler leans on this frame (FSR 3.1 smears its history over the whole picture in a turn)
-    react = max(react, 0.6 * saturate((length(best) - 3.0) / 12.0));
+    react = max(react, 0.95 * saturate((length(best) - 1.5) / 6.0));
 #endif
     uReact[id.xy] = react;
 }
