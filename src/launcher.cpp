@@ -3377,13 +3377,20 @@ void App::OnClick(int id)
                     L"Upscalers", L"Dx12Upscaler",
                     values[st_.upscalerMode], iniPath.c_str()))
             {
-                // FSR 3.1.5: FSR upscaler index 2. FSR 4.1.2: automatic index, plus sharpness, CAS and the native upscaler pass.
+                // FSR 3.1.5: FSR upscaler index 2 (the comment in OptiScaler.ini about the indexes is out of date). FSR 4.1.2: automatic index, plus sharpness, CAS and the native upscaler pass.
                 if (st_.upscalerMode == 1)
                 {
                     WritePrivateProfileStringW(L"FSR", L"UpscalerIndex", L"2", iniPath.c_str());
+                    // less smearing of the history in motion (the reactive mask counts three times, shading changes twice, less accumulation on disocclusion)
+                    WritePrivateProfileStringW(L"FSR", L"ReactiveScale", L"3.000000", iniPath.c_str());
+                    WritePrivateProfileStringW(L"FSR", L"ShadingScale", L"2.000000", iniPath.c_str());
+                    WritePrivateProfileStringW(L"FSR", L"AccAddPerFrame", L"0.200000", iniPath.c_str());
                 }
                 else if (st_.upscalerMode == 4)
                 {
+                    WritePrivateProfileStringW(L"FSR", L"ReactiveScale", L"auto", iniPath.c_str());
+                    WritePrivateProfileStringW(L"FSR", L"ShadingScale", L"auto", iniPath.c_str());
+                    WritePrivateProfileStringW(L"FSR", L"AccAddPerFrame", L"auto", iniPath.c_str());
                     WritePrivateProfileStringW(L"FSR", L"UpscalerIndex", L"auto", iniPath.c_str());
                     WritePrivateProfileStringW(L"Sharpness", L"OverrideSharpness", L"true", iniPath.c_str());
                     WritePrivateProfileStringW(L"Sharpness", L"Sharpness", L"0.600000", iniPath.c_str());
