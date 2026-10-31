@@ -3252,14 +3252,14 @@ void App::OnClick(int id)
         static const Entry entries[] = {
             { 4, 3 }, { 4, 0 }, { 4, 1 }, { 4, 2 },
             { 5, 3 }, { 5, 0 }, { 5, 1 }, { 5, 2 },
-            { 2, 0 }, { 2, 1 }, { 2, 2 }, { 3, 0 }, { 3, 1 }, { 3, 2 }, { 1, 0 }, { 1, 1 }, { 1, 2 } };
+            { 2, 3 }, { 2, 0 }, { 2, 1 }, { 2, 2 }, { 3, 3 }, { 3, 0 }, { 3, 1 }, { 3, 2 }, { 1, 3 }, { 1, 0 }, { 1, 1 }, { 1, 2 } };
         constexpr int kEntries = static_cast<int>(sizeof(entries) / sizeof(entries[0]));
         HMENU menu = CreatePopupMenu();
         if (menu)
         {
             for (int i = 0; i < kEntries; ++i)
             {
-                if (i == 4 || i == 8)
+                if (i > 0 && entries[i].method != entries[i - 1].method)
                     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
                 const Entry& e = entries[i];
                 const int cw = (static_cast<int>(mw / lvF[e.level] + 0.5)) & ~1;
