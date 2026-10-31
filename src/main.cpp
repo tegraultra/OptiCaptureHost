@@ -1560,7 +1560,7 @@ bool Host::InitMotion3Pipelines()
         ComPtr<ID3DBlob> cs, e;
         const D3D_SHADER_MACRO defs[] = { { define, "1" }, { nullptr, nullptr } };
         const HRESULT h = D3DCompile(kFsrFlow3Hlsl, sizeof(kFsrFlow3Hlsl) - 1, "fsr_flow3.hlsl", defs, nullptr, entry, "cs_5_0",
-                                     D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &cs, &e);
+                                     D3DCOMPILE_OPTIMIZATION_LEVEL1, 0, &cs, &e);
         if (FAILED(h))
         {
             Log("FSR3/4: Motion 3 shader %s/%s failed: 0x%08X %s", define, entry, static_cast<unsigned>(h),

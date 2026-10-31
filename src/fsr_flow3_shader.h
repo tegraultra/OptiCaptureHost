@@ -42,10 +42,13 @@ RWTexture2D<float2> uOut : register(u0);
 // the mean difference of an 8x8 window (brightness 0..1) against the frame before, shifted by d
 float Cost(float win[64], int2 org, int2 d)
 {
+    // a real loop over the rows (unrolled everywhere it is used, the shader took very long to compile)
     float s = 0.0;
-    [unroll] for (int j = 0; j < 8; ++j)
+    [loop] for (int j = 0; j < 8; ++j)
+    {
         [unroll] for (int i = 0; i < 8; ++i)
             s += abs(win[j * 8 + i] - Prev(org + int2(i, j) + d));
+    }
     return s * (1.0 / 64.0);
 }
 static const float kLambda = 0.0012; // price per pixel of straying from the surroundings' guess
@@ -59,9 +62,11 @@ void CSSearch2(uint3 id : SV_DispatchThreadID)
     if (id.x >= outSize.x || id.y >= outSize.y) return;
     const int2 org = int2(id.xy) * 4 - 2;
     float win[64];
-    [unroll] for (int j = 0; j < 8; ++j)
+    [loop] for (int j = 0; j < 8; ++j)
+    {
         [unroll] for (int i = 0; i < 8; ++i)
             win[j * 8 + i] = Cur(org + int2(i, j));
+    }
     const float zeroCost = Cost(win, org, int2(0, 0));
     if (zeroCost < kStatic) { uOut[id.xy] = float2(0.0, 0.0); return; }
     int2 best = int2(0, 0);
@@ -102,9 +107,11 @@ void CSRefine(uint3 id : SV_DispatchThreadID)
     if (id.x >= outSize.x || id.y >= outSize.y) return;
     const int2 org = int2(id.xy) * 4 - 2;
     float win[64];
-    [unroll] for (int j = 0; j < 8; ++j)
+    [loop] for (int j = 0; j < 8; ++j)
+    {
         [unroll] for (int i = 0; i < 8; ++i)
             win[j * 8 + i] = Cur(org + int2(i, j));
+    }
     const float zeroCost = Cost(win, org, int2(0, 0));
     if (zeroCost < kStatic) { uOut[id.xy] = float2(0.0, 0.0); return; }
 
@@ -117,7 +124,7 @@ void CSRefine(uint3 id : SV_DispatchThreadID)
     // the vector median of the 3x3 coarse blocks around the nearest one
     const int2 pn = p0 + int2(round(pt));
     float mx[9], my[9];
-    [unroll] for (int k = 0; k < 9; ++k)
+    [loop] for (int k = 0; k < 9; ++k)
     {
         const float2 v = Par(pn + int2(k % 3 - 1, k / 3 - 1)) * 2.0;
         mx[k] = v.x; my[k] = v.y;
@@ -130,7 +137,7 @@ void CSRefine(uint3 id : SV_DispatchThreadID)
     cands[5] = blend; cands[6] = med;
     int2 best = int2(0, 0);
     float bestScore = 1e9;
-    [unroll] for (int c = 0; c < 7; ++c)
+    [loop] for (int c = 0; c < 7; ++c)
     {
         const int2 d = int2(round(cands[c]));
         const float s = Cost(win, org, d) + kLambda * length(float2(d) - blend);
