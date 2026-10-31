@@ -1066,9 +1066,11 @@ void Host::CreateLabel()
     static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR3/4", L"DLSS" };
     wchar_t text[64];
     labelH_ = height_;
-    swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 5) ? upMethod_ : 0]);
+    static const wchar_t* const lvNames[] = { L"Quality", L"Balanced", L"Performance", L"Native" };
+    swprintf(text, 64, L"%u to %u  (%s \u00B7 %s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 5) ? upMethod_ : 0],
+             lvNames[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 3) ? st_.upscaleLevel : 0]);
     label_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT, wc.lpszClassName,
-                             text, WS_POPUP, mi.rcMonitor.left + 16, mi.rcMonitor.top + 16, 270, 40, nullptr, nullptr, inst_, nullptr);
+                             text, WS_POPUP, mi.rcMonitor.left + 16, mi.rcMonitor.top + 16, 400, 40, nullptr, nullptr, inst_, nullptr);
     if (!label_)
         return;
     SetLayeredWindowAttributes(label_, 0, 215, LWA_ALPHA);
@@ -1087,7 +1089,9 @@ void Host::UpdateLabel()
             static const wchar_t* names[] = { L"", L"bilinear", L"FSR 1", L"NIS", L"FSR3/4", L"DLSS" };
             wchar_t text[64];
             labelH_ = height_;
-            swprintf(text, 64, L"%u to %u  (%s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 5) ? upMethod_ : 0]);
+            static const wchar_t* const lvNames[] = { L"Quality", L"Balanced", L"Performance", L"Native" };
+    swprintf(text, 64, L"%u to %u  (%s \u00B7 %s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 5) ? upMethod_ : 0],
+             lvNames[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 3) ? st_.upscaleLevel : 0]);
             SetWindowTextW(label_, text);
             InvalidateRect(label_, nullptr, TRUE);
             labelUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(st_.labelSeconds);
