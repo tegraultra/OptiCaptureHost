@@ -2369,8 +2369,14 @@ void App::ResizeGameWindow(bool quiet)
     if (quiet)
         return;
     if (cr.right - cr.left == cw && cr.bottom - cr.top == ch)
-        SetNote(L"Game window is now " + std::to_wstring(cw) + L"x" + std::to_wstring(ch) + L". The host scales it to " +
+        {
+        static const wchar_t* const methodN[] = { L"Off", L"Bilinear", L"FSR 1", L"NIS", L"FSR3/4", L"DLSS" };
+        static const wchar_t* const levelN[] = { L"Quality", L"Balanced", L"Performance", L"Native" };
+        const std::wstring mode = std::wstring(methodN[(st_.upscale >= 0 && st_.upscale <= 5) ? st_.upscale : 0]) + L" \u00B7 " +
+                                  levelN[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 3) ? st_.upscaleLevel : 0];
+        SetNote(L"Game window is now " + std::to_wstring(cw) + L"x" + std::to_wstring(ch) + L" (" + mode + L"). The host scales it to " +
                     std::to_wstring(mw) + L"x" + std::to_wstring(mh) + L".", Note::Ok);
+    }
     else
         SetNote(L"Window is now " + std::to_wstring(cr.right - cr.left) + L"x" + std::to_wstring(cr.bottom - cr.top) +
                     L" (wanted " + std::to_wstring(cw) + L"x" + std::to_wstring(ch) + L"). Set the game's own resolution if it differs.",
