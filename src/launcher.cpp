@@ -1479,7 +1479,7 @@ class App
     bool PresetActive(int k) const
     {
         return st_.frameGenMode == PresetFg(k) && st_.mfgCount == PresetMfg(k) && st_.limitFps == PresetLimit(k) && st_.limitAuto == 1 && st_.limitTarget != 0 &&
-               st_.presentMode == 6 && st_.upscale == (k >= 1 ? 2 : 5) && st_.upscaleLevel == (k >= 1 && k <= 3 ? 3 : 0);
+               st_.presentMode == 6 && st_.upscale == 0;
     }
     void ApplyPreset(int k)
     {
@@ -1490,17 +1490,13 @@ class App
         if (st_.limitTarget == 0)
             st_.limitTarget = 1; // the game's own profile
         st_.presentMode = 6;
-        // new GPU modes: Output scaling with DLSS on Quality; old GPU modes: FSR 1 on Quality (the game window is made smaller at START)
-        // NO FG: DLSS Quality; new GPU modes (x2 / x3 / x4): FSR 1 Native; old GPU modes: FSR 1 Quality
-        st_.upscale = k >= 1 ? 2 : 5;
-        st_.upscaleLevel = (k >= 1 && k <= 3) ? 3 : 0;
-        st_.upscalerMode = k >= 4 ? 1 : 4; // Opti Upscaler: FSR 3.1.5 for the old GPU modes, FSR 4.1.2 for the others
+        // every mode: Output scaling off
+        st_.upscale = 0;
         Save();
         static const wchar_t* const names[] = { L"NO FG MOD", L"x2 FG MOD (NEW GPU)", L"x3 FG MOD (NEW GPU)", L"x4 FG MOD (NEW GPU)",
                                                 L"x2 FG MOD (OLD GPU)", L"x3 FG MOD (OLD GPU)", L"x4 FG MOD (OLD GPU)" };
         SetNote(std::wstring(names[k]) + L": limiter, present mode and frame generation set.", Note::Ok);
         OnClick(kIdFrameGenApply); // writes OptiScaler.ini for the chosen frame generation (and the picture upscaler when output scaling is on)
-        OnClick(kIdUpscalerApply);
     }
     gp::RectF upSliderRect_{};
     bool upSliding_ = false;
@@ -3061,7 +3057,6 @@ void App::OnClick(int id)
             {
                 std::wstring t = std::to_wstring(v) + L" ms";
                 if (v == 0) t += L"  (off)";
-                if (v == 3) t += L"  (recommended)";
                 AppendMenuW(menu, MF_STRING | (st_.presentDelay == v ? MF_CHECKED : 0), kDelayMenuBase + v, t.c_str());
             }
             POINT pt{};
@@ -3305,7 +3300,7 @@ void App::OnClick(int id)
     }
     else if (id == kIdMotionSelect)
     {
-        static const wchar_t* mv[] = { L"Version 1  (the old block search)", L"", L"Version 3  (old search + temporal steadiness, recommended)" };
+        static const wchar_t* mv[] = { L"Version 1  (the old block search)", L"", L"Version 3  (old search + temporal steadiness)" };
         HMENU menu = CreatePopupMenu();
         if (menu)
         {
@@ -3969,7 +3964,7 @@ void App::Paint(HDC dc, int W, int H)
 
     // ---- present mode selector ----
     {
-        static const wchar_t* presentNames[] = { L"Auto  (recommended)", L"Always no wait  (interval 0)", L"Always wait for vblank  (interval 1)", L"Classic  (like 2.2.0)", L"Lossless-style  (low latency)", L"Classic + half refresh", L"Classic + unlimited" };
+        static const wchar_t* presentNames[] = { L"Auto", L"Always no wait  (interval 0)", L"Always wait for vblank  (interval 1)", L"Classic  (like 2.2.0)", L"Lossless-style  (low latency)", L"Classic + half refresh", L"Classic + unlimited" };
 
         Text(g, L"Present mode", *f_.bodyB, R(44, 654, 130, 24), col::Text());
 
@@ -3991,7 +3986,6 @@ void App::Paint(HDC dc, int W, int H)
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
         std::wstring t = std::to_wstring(st_.presentDelay) + L" ms";
         if (st_.presentDelay == 0) t += L"  (off)";
-        else if (st_.presentDelay == 3) t += L"  (recommended)";
         Text(g, t, *f_.chip, R(186, 698, 308, 22), col::Text());
         AddHit(selector, kIdDelaySelect);
     }
@@ -4030,7 +4024,7 @@ void App::Paint(HDC dc, int W, int H)
         const bool hot = hover_ == kIdMotionSelect;
         FillRound(g, selector, S(8), hot ? col::RowHot() : col::Row());
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
-        static const wchar_t* mvShort[] = { L"Version 1  (old)", L"Version 3  (recommended)", L"Version 3  (recommended)" };
+        static const wchar_t* mvShort[] = { L"Version 1", L"Version 3", L"Version 3" };
         Text(g, mvShort[(st_.motionVer >= 1 && st_.motionVer <= 3) ? st_.motionVer - 1 : 2], *f_.chip, R(186, 831, 308, 22),
              used ? col::Text() : col::Muted());
         AddHit(selector, kIdMotionSelect);

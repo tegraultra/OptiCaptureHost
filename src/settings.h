@@ -39,7 +39,7 @@ struct Settings
     int motion3 = 0;          // Motion3 experiment (fsr_flow3_shader.h): multi-scale motion vectors; [Upscale] Motion3
     int motion2 = 0;          // Motion2 experiment (fsr_flow2_shader.h): steadier motion vectors; [Upscale] Motion2
     int dlssPreset = 0;       // DLSS model (preset): 0 auto (L when upscaling, E at 1:1), 5 E, 10 J, 11 K, 12 L, 13 M; [Upscale] DlssPreset
-    int upscale = 4;          // output scaling: 0 off, 1 bilinear, 2 FSR1 (EASU+RCAS), 3 NIS, 4 FSR3/4 (motion measured from the frames + AMD runtime); read at start
+    int upscale = 0;          // output scaling: 0 off, 1 bilinear, 2 FSR1 (EASU+RCAS), 3 NIS, 4 FSR3/4 (motion measured from the frames + AMD runtime); read at start
     int upscaleLevel = 0;     // input size: 0 Quality 67%, 1 Balanced 58%, 2 Performance 50%, 3 Native 100% (FSR3/4 only: anti-aliasing, no resize)
     int labelSeconds = 8;     // output scaling: show "720 to 1080" in the corner for this many seconds (0 never, 999 always)
     int nisSharp = 50;        // NIS sharpness x100 (0..100)
@@ -116,8 +116,8 @@ inline void LoadSettings(Settings& s)
 
     s.presentMode = GetPrivateProfileIntW(L"Advanced", L"PresentMode", 3, path.c_str());
     if (s.presentMode < 0 || s.presentMode > 6) s.presentMode = 3;
-    s.upscale = GetPrivateProfileIntW(L"Upscale", L"Method", 4, path.c_str());
-    if (s.upscale < 0 || s.upscale > 5) s.upscale = 4;
+    s.upscale = GetPrivateProfileIntW(L"Upscale", L"Method", 0, path.c_str());
+    if (s.upscale < 0 || s.upscale > 5) s.upscale = 0;
     s.motion2 = GetPrivateProfileIntW(L"Upscale", L"Motion2", 0, path.c_str()) != 0 ? 1 : 0; // Motion2
     s.motionVer = GetPrivateProfileIntW(L"Upscale", L"MotionVersion", 3, path.c_str());
     if (s.motionVer != 1) s.motionVer = 3; // version 2 was removed
