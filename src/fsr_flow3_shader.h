@@ -51,7 +51,8 @@ float Cost(float win[64], int2 org, int2 d)
     }
     return s * (1.0 / 64.0);
 }
-static const float kLambda = 0.0012; // price per pixel of straying from the surroundings' guess
+static const float kLambda = 0.0012; // price per pixel of straying from the surroundings' guess (the coarse search)
+static const float kLambdaR = 0.0006; // the same, finer sizes: a different surface may move differently (grass against a rock)
 static const float kStatic = 0.003;  // a block this unchanged is not searched (HUD, a still scene)
 
 #if defined(PASS_SEARCH2)
@@ -143,8 +144,23 @@ void CSRefine(uint3 id : SV_DispatchThreadID)
         const float s = Cost(win, org, d) + kLambda * length(float2(d) - blend);
         if (s < bestScore) { bestScore = s; best = d; }
     }
-    // two rounds of the eight neighbours: reaches +-2 around the best start
-    [loop] for (int round2 = 0; round2 < 2; ++round2)
+    // a surface at another depth moves differently from the coarser blocks' guess (the ground against an object): a wider look around the
+    // guess, every 4th pixel, up to +-12; it wins only where it matches clearly better than staying close to the guess
+    {
+        const int2 gc = int2(round(blend));
+        [loop] for (int wy = -3; wy <= 3; ++wy)
+        {
+            [loop] for (int wx = -3; wx <= 3; ++wx)
+            {
+                if (wx == 0 && wy == 0) continue;
+                const int2 d = gc + int2(wx, wy) * 4;
+                const float s = Cost(win, org, d) + kLambdaR * length(float2(d) - blend);
+                if (s < bestScore) { bestScore = s; best = d; }
+            }
+        }
+    }
+    // three rounds of the eight neighbours: reaches +-3 around the best start
+    [loop] for (int round2 = 0; round2 < 3; ++round2)
     {
         const int2 centre = best;
         [loop] for (int ry = -1; ry <= 1; ++ry)
@@ -153,18 +169,20 @@ void CSRefine(uint3 id : SV_DispatchThreadID)
             {
                 if (rx == 0 && ry == 0) continue;
                 const int2 d = centre + int2(rx, ry);
-                const float s = Cost(win, org, d) + kLambda * length(float2(d) - blend);
+                const float s = Cost(win, org, d) + kLambdaR * length(float2(d) - blend);
                 if (s < bestScore) { bestScore = s; best = d; }
             }
         }
     }
 #if defined(PASS_BLOCK)
     // sub-pixel: a parabola through the cost at -1, 0, +1 along each axis (without the price)
-    const float c0 = Cost(win, org, best);
-    const float cxM = Cost(win, org, best + int2(-1, 0));
-    const float cxP = Cost(win, org, best + int2(1, 0));
-    const float cyM = Cost(win, org, best + int2(0, -1));
-    const float cyP = Cost(win, org, best + int2(0, 1));
+    float cs[5];
+    [loop] for (int k2 = 0; k2 < 5; ++k2)
+    {
+        const int2 o = (k2 == 0) ? int2(0, 0) : (k2 == 1) ? int2(-1, 0) : (k2 == 2) ? int2(1, 0) : (k2 == 3) ? int2(0, -1) : int2(0, 1);
+        cs[k2] = Cost(win, org, best + o);
+    }
+    const float c0 = cs[0], cxM = cs[1], cxP = cs[2], cyM = cs[3], cyP = cs[4];
     const float denomX = 2.0 * (cxM + cxP - 2.0 * c0);
     const float denomY = 2.0 * (cyM + cyP - 2.0 * c0);
     const float subX = (abs(denomX) > 1e-5) ? clamp((cxM - cxP) / denomX, -0.45, 0.45) : 0.0;
