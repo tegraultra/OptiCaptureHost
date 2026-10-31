@@ -1495,13 +1495,14 @@ class App
         st_.upscaleLevel = 0;
         if (st_.upscale == 5)
             st_.upscalerMode = 4; // Opti Upscaler: FSR 4.1.2 whenever DLSS or FSR3/4 output scaling is on
+        else
+            st_.upscalerMode = 1; // old GPU modes: Opti Upscaler FSR 3.1.5
         Save();
         static const wchar_t* const names[] = { L"NO FG MOD", L"x2 FG MOD (NEW GPU)", L"x3 FG MOD (NEW GPU)", L"x4 FG MOD (NEW GPU)",
                                                 L"x2 FG MOD (OLD GPU)", L"x3 FG MOD (OLD GPU)", L"x4 FG MOD (OLD GPU)" };
         SetNote(std::wstring(names[k]) + L": limiter, present mode and frame generation set.", Note::Ok);
         OnClick(kIdFrameGenApply); // writes OptiScaler.ini for the chosen frame generation (and the picture upscaler when output scaling is on)
-        if (st_.upscale >= 4)
-            OnClick(kIdUpscalerApply);
+        OnClick(kIdUpscalerApply);
     }
     gp::RectF upSliderRect_{};
     bool upSliding_ = false;
