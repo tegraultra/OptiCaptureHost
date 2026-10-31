@@ -2902,7 +2902,7 @@ void App::OnClick(int id)
                 vsyncMode_ = -1; // and VSync goes to Auto
                 ApplyVsyncToOptiScaler();
                 Save();
-
+                OnClick(kIdUpscalerApply); // the chosen Opti Upscaler is written again with every frame generation choice
 
                 SetNote(std::wstring(L"Selected: ") + kFgNames[st_.frameGenMode] + L". Press Apply to write OptiScaler.ini.", Note::Ok);
             }
@@ -3420,7 +3420,7 @@ void App::OnClick(int id)
                     values[st_.upscalerMode], iniPath.c_str()))
             {
                 // FSR 3.1.5: FSR upscaler index 2 (the comment in OptiScaler.ini about the indexes is out of date). FSR 4.1.2: automatic index, plus sharpness, CAS and the native upscaler pass.
-                if (st_.upscalerMode == 1)
+                if (st_.upscalerMode == 1 || st_.upscalerMode == 3) // FSR 3.1.5 and DLSS 3.7 (which runs on the FSR upscaler)
                 {
                     WritePrivateProfileStringW(L"FSR", L"UpscalerIndex", L"2", iniPath.c_str());
                 }
