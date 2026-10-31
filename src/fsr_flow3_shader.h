@@ -272,7 +272,10 @@ void CSBlock3(uint3 id : SV_DispatchThreadID)
         const float cc = BlockCostV1(win, org, d);
         if (cc < pickCost) { pickCost = cc; pick = d; }
     }
-    if (oldBest > 2.0 && pickCost < 0.65 * oldBest) // only where the old search found no good match at all
+    // only where the old search found no good match at all, and the coarse blocks around agree with each other (one surface): beside a
+    // character or an object's edge they disagree, and there the old search's own answer stays
+    const float spread = max(max(length(v00 - blend), length(v10 - blend)), max(length(v01 - blend), length(v11 - blend)));
+    if (oldBest > 2.0 && spread < 3.0 && pickCost < 0.65 * oldBest)
     {
         // refine the winner by one pixel, then it is used
         best = pick;
