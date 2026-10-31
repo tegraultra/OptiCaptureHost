@@ -3420,7 +3420,11 @@ void App::OnClick(int id)
                     values[st_.upscalerMode], iniPath.c_str()))
             {
                 // FSR 3.1.5: FSR upscaler index 2 (the comment in OptiScaler.ini about the indexes is out of date). FSR 4.1.2: automatic index, plus sharpness, CAS and the native upscaler pass.
-                if (st_.upscalerMode == 1 || st_.upscalerMode == 3) // FSR 3.1.5 and DLSS 3.7 (which runs on the FSR upscaler)
+                if (st_.upscalerMode == 3) // DLSS 3.7 (runs on the FSR upscaler): index 1
+                {
+                    WritePrivateProfileStringW(L"FSR", L"UpscalerIndex", L"1", iniPath.c_str());
+                }
+                else if (st_.upscalerMode == 1)
                 {
                     WritePrivateProfileStringW(L"FSR", L"UpscalerIndex", L"2", iniPath.c_str());
                 }
