@@ -2,11 +2,13 @@
 
 # OptiCaptureHost
 
-### Frame generation and modern upscaling for **any** game window.
+### Frame generation and modern upscaling for **any** game window — now open source.
 **FSR 4 · XeSS · Multi Frame Generation up to 6x · DLSS / FSR 3-4 output scaling** — without touching the game.
 
 [![Latest release](https://img.shields.io/github/v/release/REPLACE_OWNER/REPLACE_REPO?style=for-the-badge&label=download)](../../releases/latest)
+[![Build](https://img.shields.io/github/actions/workflow/status/REPLACE_OWNER/REPLACE_REPO/build.yml?style=for-the-badge&label=build)](../../actions)
 [![Platform](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078d4?style=for-the-badge)](#requirements)
+[![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
 [![Telegram](https://img.shields.io/badge/Telegram-MKJH__APPS-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/MKJH_APPS)
 
 **by MK-JH**
@@ -29,104 +31,134 @@ The game itself is **never injected, patched or modified**.
  (untouched)                       motion + upscaling      (flip model)      FG / FSR 4 / XeSS
 ```
 
+The project has two programs:
+
+| Program | Job |
+|---|---|
+| `OptiCaptureLauncher.exe` | The control panel: pick a game, profiles, frame generation, limiter, output scaling, writes `OptiScaler.ini`. |
+| `OptiCaptureHost.exe` | The capture + overlay + upscaling worker the launcher starts. |
+
 ## Highlights
 
 - **Works on almost anything that runs in a window** — DX9, DX11, DX12, Vulkan, OpenGL, emulators.
-- **Multi Frame Generation from 2x up to 6x** — Intel XeFG and the DLSSG-based modes, picked with one click.
-- **One-click profiles** — *NO FG*, *x2 / x3 / x4 (NEW GPU)* and *x2 / x3 / x4 (OLD GPU)*. A profile sets frame generation, the frame limiter, the present mode and output scaling together.
-- **Output scaling with temporal upscalers** — run the game at a lower resolution and let the host scale it to your monitor:
+- **Multi Frame Generation from 2x up to 6x** — Intel XeFG and the DLSSG-based modes.
+- **One-click profiles** — *NO FG*, *x2 / x3 / x4 (NEW GPU)*, *x2 / x3 / x4 (OLD GPU)*: frame generation, frame limiter and present mode set together.
+- **Output scaling** — run the game at a lower resolution, let the host scale it to your monitor:
 
   | Method | What it is |
   |---|---|
-  | **DLSS** | NVIDIA DLSS Super Resolution (RTX cards, needs `nvngx_dlss.dll`) |
+  | **DLSS** | NVIDIA DLSS Super Resolution (RTX, needs `nvngx_dlss.dll`) |
   | **FSR 3 / 4** | AMD FidelityFX upscaler (any GPU, needs `amd_fidelityfx_dx12.dll`) |
   | FSR 1 | EASU + RCAS, no extra files |
   | NIS | NVIDIA Image Scaling, no extra files |
   | Bilinear | Plain scaling |
 
-  Levels: **Native (1x)**, **Quality (1.5x)**, **Balanced (1.7x)**, **Performance (2x)**. 
-- **The host measures the motion itself.** DLSS and FSR need motion vectors, and a window capture has none, so the host estimates them from consecutive frames on the GPU (block matching with sub-pixel refinement and a confidence mask).
-- **Sharpness slider** with its own RCAS pass, applied after the upscaler.
-- **Automatic window handling** — START shrinks the game window to the right render size, STOP restores it, and if the game changes its resolution in its own settings the size is put back.
-- **Frame limiter built in** — up to 500 fps through RivaTuner, and OptiScaler's own limit set to your monitor's refresh rate at every start.
-- **Low-latency present modes**, VSync on/off (real tearing with VSync off), configurable hotkeys.
-- **Live status panel** with frame pacing numbers, warnings as dialogs you can silence with "don't show again".
-- **Reset all** puts every option back to its default.
+  Levels: **Native (1x)**, **Quality (1.5x)**, **Balanced (1.7x)**, **Performance (2x)**.
+- **The host measures motion itself.** A window capture has no motion vectors, so the host estimates them from consecutive frames on the GPU (block matching, sub-pixel refinement, temporal steadiness, a reactive mask). Two versions can be chosen in the launcher.
+- **Opti Upscaler selector** — FSR 3.1.5, FSR 4.1.2, DLSS 3.7, DittoSR, XeSS, DLSS; picking one writes `OptiScaler.ini` and copies that upscaler's folder next to the exes.
+- Built-in frame limiter, low-latency present modes, VSync on/off/auto, configurable hotkeys, live status panel.
 
 ## Requirements
 
 - Windows 10 (2004+) or Windows 11, 64-bit
 - A GPU with DirectX 12 (Intel Arc, NVIDIA, AMD)
-- Game running in **Borderless Fullscreen or Windowed** mode (not Exclusive Fullscreen)
-- OptiScaler files (see below)
-- Optional: **RivaTuner Statistics Server** for the frame limiter
-- Optional: an **NVIDIA RTX** card for DLSS
+- Game in **Borderless Fullscreen or Windowed** mode (not Exclusive Fullscreen)
+- OptiScaler files (not included, see below)
+- Optional: RivaTuner Statistics Server (frame limiter), an NVIDIA RTX card (DLSS)
 
-## Quick start
+## Quick start (users)
 
-1. **Download** `OptiCaptureHost-win64.zip` from the [latest release](../../releases/latest) and unpack it into a folder of its own.
-2. **Add OptiScaler** to the same folder: OptiScaler renamed to `dxgi.dll`, its `OptiScaler.ini`, the FSR 4 DLL you use, and the frame generation files for your mode (`libxess_fg.dll`, `libxell.dll`, `XeFGUnlock.asi` for Intel XeFG).
-3. *(Optional)* For **FSR 3 / 4** put AMD's `amd_fidelityfx_dx12.dll` next to the exes. For **DLSS** put NVIDIA's `nvngx_dlss.dll` next to the exes (or in a `dlss` folder).
-4. Start the game in Borderless / Windowed mode.
-5. Run **`OptiCaptureLauncher.exe`**, click your game in the list, choose a profile, and press **START**.
+1. Download `OptiCaptureHost-<version>-win64.zip` from the [latest release](../../releases/latest) into a folder of its own.
+2. Add OptiScaler to the same folder: OptiScaler renamed to `dxgi.dll`, its `OptiScaler.ini`, and the files of your frame generation / upscaler.
+3. Optional: `amd_fidelityfx_dx12.dll` (FSR 3/4) and `nvngx_dlss.dll` (DLSS) next to the exes.
+4. Start the game in Borderless / Windowed mode, run `OptiCaptureLauncher.exe`, click the game, choose a profile, press **START**.
 
-> The runtimes of AMD, NVIDIA, Intel and OptiScaler are theirs and are **not included** in this download. Get them from their official sources.
+> The runtimes of AMD, NVIDIA, Intel and OptiScaler are theirs and are **not included**. Get them from their official sources.
 
-## Profiles
+## Building from source
 
-| Profile | Frame generation | Output scaling |
-|---|---|---|
-| NO FG MOD | off | DLSS Quality |
-| x2 / x3 / x4 FG MOD (NEW GPU) | Intel MFG (XeFG) at 2x / 3x / 4x | DLSS Quality |
-| x2 / x3 / x4 FG MOD (OLD GPU) | DLSSG-based MFG at 2x / 3x / 4x | DLSS Quality |
+You need **Windows**, **Visual Studio 2022** (Desktop development with C++) and **CMake 3.20+**.
 
-Every profile also sets the frame limiter to the refresh rate (or 1/2, 1/3, 1/4 of it) and the low-latency present mode. You can change any single option afterwards.
-If DLSS isn't available (no RTX card or no `nvngx_dlss.dll`), the host falls back to FSR 1 and says so in the log.
+```powershell
+git clone https://github.com/REPLACE_OWNER/REPLACE_REPO.git
+cd REPLACE_REPO
+cmake -S . -B build -A x64
+cmake --build build --config Release
+# build\Release\OptiCaptureHost.exe, build\Release\OptiCaptureLauncher.exe
+```
 
-## Hotkeys (defaults, all changeable)
+**DLSS support is optional at build time.** NVIDIA's NGX SDK is not stored in this repository (it has its own licence). The GitHub Actions
+workflow downloads it from NVIDIA's public repository into `third_party/ngx` before building. If you build locally, copy NVIDIA's headers into
+`third_party/ngx/include` and `nvsdk_ngx_s.lib` into `third_party/ngx/lib`; without them CMake builds the host **without DLSS** and the log says so.
 
-| Action | Default |
-|---|---|
-| Stop capture | `Ctrl+Shift+F12` |
-| Game / menu focus | `Ctrl+Shift+F11` |
-| OptiScaler menu | `Ctrl+Shift+F10` |
-| Show the launcher | `Ctrl+Shift+F9` |
+**Continuous builds:** every push runs [`build.yml`](.github/workflows/build.yml). On `main` it publishes a release named after
+`src/version.h` (tag `vX.Y.Z`); older releases are kept.
 
-The "OptiScaler menu" key must match `ShortcutKey` in `OptiScaler.ini`.
+## Project layout
+
+```
+src/
+  main.cpp               host: capture, D3D12 overlay, upscaling passes, FSR/DLSS integration
+  launcher.cpp           launcher UI (GDI+), profiles, OptiScaler.ini writer
+  settings.h             all settings, OptiCaptureHost.ini load/save
+  version.h              the one place for the version number
+  upscale_shader.h       FSR 1 (EASU/RCAS) shaders        (AMD, MIT)
+  nis_shader.h/_config.h NVIDIA Image Scaling             (NVIDIA, MIT)
+  fsr_flow_shader.h      motion vectors, version 1 (block search)
+  fsr_flow2_shader.h     per-pixel pass used by version 3
+  fsr_flow3_shader.h     motion vectors, version 3 (version 1 + temporal steadiness)
+third_party/ffx/         AMD FidelityFX API headers       (MIT)
+```
+
+### Where to work
+
+- **Motion estimation** (the biggest quality lever for DLSS / FSR 3): `fsr_flow*_shader.h`. New ideas go in a **new, switchable module**, with the old one kept — see how version 3 is wired (`MotionVersion` in `settings.h`, the launcher selector).
+- **Launcher options:** add an id in `launcher.cpp`, draw it in `Paint`, handle it in `OnClick`, store it in `settings.h`.
+- Keep `motionVectorScale` at `{1, -1}`; the vectors point from a pixel to where it was in the previous frame.
+
+### Contributing
+
+Pull requests and issues are welcome. Please:
+1. Keep changes focused; one feature or fix per PR.
+2. Say what you tested (GPU, game, upscaler). The CI only checks that it builds.
+3. For quality work attach a short before/after clip and `OptiCaptureHost.log`.
+4. Don't add third-party binaries (DLLs from AMD, NVIDIA, Intel, OptiScaler) to the repository.
 
 ## Good to know
 
-- **Latency:** the capture adds one hop. Use VSync **off** at START for real tearing and the lowest latency; your monitor's refresh rate still caps the output.
-- **Mouse:** with output scaling on, the pointer is not remapped. It lands where it is on the real desktop, not on the scaled picture.
-- **Temporal upscalers on a capture:** there is no game jitter and no true depth, so DLSS / FSR 3-4 here work from measured motion. Expect them to be a bit softer than in-game DLSS; that is what the sharpness slider is for. This part is **experimental** and improving.
-- **Online games:** the game isn't modified, but capturing a window and resizing it can still upset some anti-cheat systems. Use it in single-player or at your own risk.
+- **Latency:** the capture adds one hop; VSync off at START gives the lowest latency.
+- **Mouse:** with output scaling on, the pointer is not remapped.
+- **Temporal upscalers on a capture:** there is no game jitter and no true depth, so DLSS / FSR 3 work from measured motion and look a bit softer than in-game. FSR 4 copes best. This part is experimental.
+- **Online games:** capturing and resizing a window can still upset some anti-cheat systems. Use at your own risk.
 
 ## Troubleshooting
 
 | Problem | Try |
 |---|---|
 | Launcher says the host stopped | Open `OptiCaptureHost.log` next to the exes; the last lines say why. |
-| Output scaling falls back to FSR 1 | The log names the missing file (`nvngx_dlss.dll` / `amd_fidelityfx_dx12.dll`) or an unsupported card. |
-| Black or frozen picture | Make sure the game is Borderless / Windowed, not Exclusive Fullscreen. |
+| Output scaling falls back to FSR 1 | The log names the missing file (`nvngx_dlss.dll` / `amd_fidelityfx_dx12.dll`). |
+| Black or frozen picture | The game must be Borderless / Windowed. |
 | No frame limiter | Install RivaTuner Statistics Server. |
-| Shimmer on fine detail | Raise the sharpness a little, or use Native / Quality instead of Performance. |
 
-## Support and feedback
+## Third-party
 
-- Telegram channel: **[@MKJH_APPS](https://t.me/MKJH_APPS)**
-- Bugs and ideas: open an [issue](../../issues) and attach `OptiCaptureHost.log`.
+| Component | Licence |
+|---|---|
+| FSR 1 EASU/RCAS shader code, FidelityFX API headers (AMD) | MIT |
+| NVIDIA Image Scaling (NIS) shader code | MIT |
+| NVIDIA NGX / DLSS SDK headers | NVIDIA's licence; **downloaded at build time, not in this repo** |
+| OptiScaler, AMD / NVIDIA / Intel runtimes | their own licences; not included |
 
-## Credits
-
-Built on top of the work of the [OptiScaler](https://github.com/optiscaler/OptiScaler) team. FSR and FidelityFX are AMD technologies, DLSS is NVIDIA's, XeSS and XeFG are Intel's.
 All trademarks belong to their owners. This project is not affiliated with or endorsed by any of them.
+
+## Support
+
+Telegram **[@MKJH_APPS](https://t.me/MKJH_APPS)** · bugs and ideas: [issues](../../issues) (attach `OptiCaptureHost.log`).
 
 ## License
 
-OptiCaptureHost is **free for personal, non-commercial use**. It is distributed as a binary; the source code is not published.
-Redistribution, modification, reverse engineering and commercial use need written permission from the author. See [LICENSE](LICENSE.txt).
-Third-party components keep their own licences and are not part of this download.
+[MIT](LICENSE) © MK-JH
 
 ---
 
-<div align="center">Made with care by <b>MK-JH</b> · <a href="https://t.me/MKJH_APPS">t.me/MKJH_APPS</a></div>
+<div align="center">Made by <b>MK-JH</b> · <a href="https://t.me/MKJH_APPS">t.me/MKJH_APPS</a></div>

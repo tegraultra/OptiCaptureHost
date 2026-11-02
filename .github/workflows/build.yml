@@ -69,6 +69,8 @@ jobs:
           name: OptiCaptureHost
           path: dist
 
+      # One release per version (tag v2.10.63, ...): every new version is ADDED and the older releases stay.
+      # Building the same version again only replaces that version's own release.
       - name: Publish release
         if: github.ref == 'refs/heads/main'
         shell: pwsh
@@ -77,12 +79,15 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $repo = '${{ github.repository }}'
+          $ver = (Select-String -Path src/version.h -Pattern '#define OC_VER_STR "([^"]+)"').Matches[0].Groups[1].Value
+          $tag = "v$ver"
+          Copy-Item OptiCaptureHost-win64.zip "OptiCaptureHost-$ver-win64.zip"
 
-          # remove any old release with this tag (even a broken one), then the tag itself
-          $ids = gh api "repos/$repo/releases?per_page=100" --jq '.[] | select(.tag_name=="build-latest") | .id'
-          foreach ($id in $ids) { gh api -X DELETE "repos/$repo/releases/$id" | Out-Null }
-          gh api -X DELETE "repos/$repo/git/refs/tags/build-latest" | Out-Null
+          # only this version's own release (if the same version was built before) is replaced
+          $rels = (gh api "repos/$repo/releases?per_page=100" | ConvertFrom-Json) | Where-Object { $_.tag_name -eq $tag }
+          foreach ($r in $rels) { gh api -X DELETE "repos/$repo/releases/$($r.id)" | Out-Null }
+          gh api -X DELETE "repos/$repo/git/refs/tags/$tag" 2>$null | Out-Null
           $global:LASTEXITCODE = 0
 
-          gh release create build-latest OptiCaptureHost-win64.zip --title "Latest build" --notes "Automatic build of the latest commit." --target ${{ github.sha }}
+          gh release create $tag "OptiCaptureHost-$ver-win64.zip" --title "OptiCaptureHost $ver" --notes "Automatic build of commit ${{ github.sha }}." --target ${{ github.sha }} --latest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
