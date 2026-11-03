@@ -1573,7 +1573,7 @@ void CSResample(uint3 id : SV_DispatchThreadID)
     const float b = gMask.Load(int3(clamp(i0 + int2(1, 0), int2(0, 0), hi), 0));
     const float c = gMask.Load(int3(clamp(i0 + int2(0, 1), int2(0, 0), hi), 0));
     const float d = gMask.Load(int3(clamp(i0 + int2(1, 1), int2(0, 0), hi), 0));
-    uReact[id.xy] = saturate(lerp(lerp(a, b, t.x), lerp(c, d, t.x), t.y));
+    uReact[id.xy] = saturate(lerp(lerp(a, b, t.x), lerp(c, d, t.x), t.y) * (float(gBW) * 0.01)); // gBW: percent of the trust mask
 }
 )HLSL";
 
@@ -2169,7 +2169,8 @@ void Host::RecordFsrTemporal()
                     f5SrvGuide_ = guide;
                     f5SrvMask_ = mask;
                 }
-                list_->SetComputeRoot32BitConstants(0, 4, consts, 0);
+                const UINT consts4[4] = { width_, height_, static_cast<UINT>(st_.motion4Mask), 0 };
+                list_->SetComputeRoot32BitConstants(0, 4, consts4, 0);
                 list_->SetComputeRootDescriptorTable(1, slot(57));
                 list_->SetComputeRootDescriptorTable(2, slot(10));
                 barrier(fsrMv_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
