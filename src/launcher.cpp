@@ -3314,17 +3314,18 @@ void App::OnClick(int id)
     }
     else if (id == kIdMotionSelect)
     {
-        static const wchar_t* mv[] = { L"Version 1  (the old block search)", L"", L"Version 3  (old search + temporal steadiness)" };
+        static const wchar_t* mv[] = { L"Version 1  (the old block search)", L"", L"Version 3  (old search + temporal steadiness)",
+                                       L"Version 4  (dense optical flow + trust mask, experimental)" };
         HMENU menu = CreatePopupMenu();
         if (menu)
         {
-            for (int v = 1; v <= 3; v += 2)
+            for (int v = 1; v <= 4; v += (v == 1 ? 2 : 1))
                 AppendMenuW(menu, MF_STRING | (st_.motionVer == v ? MF_CHECKED : 0), kMotionMenuBase + v, mv[v - 1]);
             POINT pt{};
             GetCursorPos(&pt);
             const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
             DestroyMenu(menu);
-            if (cmd == kMotionMenuBase + 1 || cmd == kMotionMenuBase + 3)
+            if (cmd == kMotionMenuBase + 1 || cmd == kMotionMenuBase + 3 || cmd == kMotionMenuBase + 4)
             {
                 st_.motionVer = static_cast<int>(cmd - kMotionMenuBase);
                 Save();
@@ -4042,8 +4043,8 @@ void App::Paint(HDC dc, int W, int H)
         const bool hot = hover_ == kIdMotionSelect;
         FillRound(g, selector, S(8), hot ? col::RowHot() : col::Row());
         StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
-        static const wchar_t* mvShort[] = { L"Version 1", L"Version 3", L"Version 3" };
-        Text(g, mvShort[(st_.motionVer >= 1 && st_.motionVer <= 3) ? st_.motionVer - 1 : 2], *f_.chip, R(186, 831, 308, 22),
+        static const wchar_t* mvShort[] = { L"Version 1", L"Version 3", L"Version 3", L"Version 4  (experimental)" };
+        Text(g, mvShort[(st_.motionVer >= 1 && st_.motionVer <= 4) ? st_.motionVer - 1 : 2], *f_.chip, R(186, 831, 308, 22),
              used ? col::Text() : col::Muted());
         AddHit(selector, kIdMotionSelect);
     }

@@ -64,6 +64,8 @@
 #include "fsr_flow_shader.h"
 #include "fsr_flow2_shader.h" // Motion2 (optional experiment, see the file)
 #include "fsr_flow3_shader.h" // Motion3 (optional experiment, see the file)
+#include "f5low/motion/OpticalFlow_Dx12.h" // Motion4: dense optical flow + trust mask (GPL-3, from OptiScaler-F5-DLSSNR-Multipass)
+#include "f5low/motion/TrustMask_Dx12.h"
 #include "ffx_api/ffx_api.h"
 #include "ffx_api/ffx_upscale.h"
 #include "ffx_api/ffx_api_loader.h"
@@ -513,6 +515,7 @@ class Host
     bool CreateUpscaleViews();
     bool InitFsrPipelines();
     bool InitMotion3Pipelines();
+    bool InitMotion4Pipelines();
     bool InitFsrTemporal();
     void ReleaseFsrTemporal();
     void RecordFsrTemporal();
@@ -580,6 +583,13 @@ class Host
     ComPtr<ID3D12RootSignature> fsr3Root_;
     ComPtr<ID3D12PipelineState> fsr3Luma1_, fsr3Luma2_, fsr3Search2_, fsr3Refine1_, fsr3Block_;
     ComPtr<ID3D12Resource> fsr3L1_[2], fsr3L2_[2], fsr3G2_, fsr3G1_;
+    // Motion4 (src/f5low): dense optical flow + trust mask
+    OpticalFlowDx12 f5Flow_;
+    TrustMaskDx12 f5Trust_;
+    ComPtr<ID3D12PipelineState> f5ResamplePso_;
+    bool f5Inited_ = false, f5Pipes_ = false, f5Ready_ = false;
+    ID3D12Resource* f5SrvGuide_ = nullptr;
+    ID3D12Resource* f5SrvMask_ = nullptr;
     bool fsr3Pipes_ = false;  // pipelines made
     bool fsr3Ready_ = false;  // textures and descriptors made
     UINT fsr3W1_ = 0, fsr3H1_ = 0, fsr3W2_ = 0, fsr3H2_ = 0;
@@ -1272,7 +1282,7 @@ bool Host::InitUpscale()
     // Descriptor heaps: SRV 0 = the captured picture, SRV 1 = the EASU result; RTV 0 = the EASU result, 1.. = back buffers.
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 17 + 40; // (17-56: Motion3, 2 frame parities x 5 passes x 4) // 0 captured picture, 1-2 NIS coefficients, 3 EASU result, 4 NIS output (UAV), 5 NIS output (SRV),
+    hd.NumDescriptors = 17 + 40 + 3; // (17-56: Motion3, 2 frame parities x 5 passes x 4; 57-59: Motion4) // 0 captured picture, 1-2 NIS coefficients, 3 EASU result, 4 NIS output (UAV), 5 NIS output (SRV),
                             // 6 temporal FSR output (SRV), 7-9 flow inputs (frame A, B, block vectors), 10-13 flow outputs (UAV: block vectors, vectors, depth, reactive mask), 14-16 flow inputs (B, A, block vectors)
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(dev12_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&upSrvHeap_))))
@@ -1529,6 +1539,78 @@ bool Host::InitFsrPipelines()
     fsr3Pipes_ = false;
     if (st_.motion3)
         fsr3Pipes_ = InitMotion3Pipelines();
+    f5Pipes_ = false;
+    if (st_.motion4)
+        f5Pipes_ = InitMotion4Pipelines();
+    return true;
+}
+
+// Motion4 (src/f5low): the dense optical flow and trust mask of OptiScaler-F5-DLSSNR-Multipass (GPL-3) plus one small pass that puts their
+// result into the textures the upscalers read. Any failure only means the old block search is used instead.
+static const char kF5ResampleHlsl[] = R"HLSL(
+Texture2D<float4> gGuide : register(t0);  // the flow at the picture's size, towards the previous frame, in pixels
+Texture2D<float> gMask : register(t1);    // the trust mask at the flow's size: 0 trust the history, 1 do not
+Texture2D<float> gUnused : register(t2);
+RWTexture2D<float2> uBlk : register(u0);
+RWTexture2D<float2> uMv : register(u1);
+RWTexture2D<float> uDepth : register(u2);
+RWTexture2D<float> uReact : register(u3);
+cbuffer C : register(b0) { uint gW; uint gH; uint gBW; uint gBH; };
+[numthreads(8, 8, 1)]
+void CSResample(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= gW || id.y >= gH) return;
+    uint gw, gh; gGuide.GetDimensions(gw, gh);
+    const int2 gp = min(int2(id.xy), int2(gw, gh) - 1);
+    uMv[id.xy] = gGuide.Load(int3(gp, 0)).xy;
+    uDepth[id.xy] = 0.5; // the capture has no depth
+    uint mw, mh; gMask.GetDimensions(mw, mh);
+    const float2 f = (float2(id.xy) + 0.5) * float2(mw, mh) / float2(gW, gH) - 0.5;
+    const int2 i0 = int2(floor(f));
+    const float2 t = saturate(f - float2(i0));
+    const int2 hi = int2(mw, mh) - 1;
+    const float a = gMask.Load(int3(clamp(i0, int2(0, 0), hi), 0));
+    const float b = gMask.Load(int3(clamp(i0 + int2(1, 0), int2(0, 0), hi), 0));
+    const float c = gMask.Load(int3(clamp(i0 + int2(0, 1), int2(0, 0), hi), 0));
+    const float d = gMask.Load(int3(clamp(i0 + int2(1, 1), int2(0, 0), hi), 0));
+    uReact[id.xy] = saturate(lerp(lerp(a, b, t.x), lerp(c, d, t.x), t.y));
+}
+)HLSL";
+
+bool Host::InitMotion4Pipelines()
+{
+    if (!f5Inited_)
+    {
+        if (!f5Flow_.Init(dev12_.Get()))
+        {
+            Log("FSR3/4: Motion 4: the optical flow could not start: %s (the old search is used)", f5Flow_.Error().c_str());
+            return false;
+        }
+        if (!f5Trust_.Init(dev12_.Get()))
+        {
+            Log("FSR3/4: Motion 4: the trust mask could not start: %s (the old search is used)", f5Trust_.Error().c_str());
+            return false;
+        }
+        f5Inited_ = true;
+    }
+    ComPtr<ID3DBlob> cs, e;
+    const HRESULT h = D3DCompile(kF5ResampleHlsl, sizeof(kF5ResampleHlsl) - 1, "f5_resample.hlsl", nullptr, nullptr, "CSResample", "cs_5_0",
+                                 D3DCOMPILE_OPTIMIZATION_LEVEL1, 0, &cs, &e);
+    if (FAILED(h))
+    {
+        Log("FSR3/4: Motion 4 shader failed: 0x%08X %s", static_cast<unsigned>(h), e ? static_cast<const char*>(e->GetBufferPointer()) : "");
+        return false;
+    }
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
+    pd.pRootSignature = fsrRoot_.Get();
+    pd.CS = { cs->GetBufferPointer(), cs->GetBufferSize() };
+    f5ResamplePso_.Reset();
+    if (FAILED(dev12_->CreateComputePipelineState(&pd, IID_PPV_ARGS(&f5ResamplePso_))))
+    {
+        Log("FSR3/4: Motion 4 pipeline failed (the old search is used)");
+        return false;
+    }
+    Log("FSR3/4: Motion 4 (dense optical flow + trust mask) is on");
     return true;
 }
 
@@ -1604,6 +1686,7 @@ void Host::ReleaseFsrTemporal()
     ReleaseDlssFeature();
     fsrTex_[0].Reset();
     fsrTex_[1].Reset();
+    f5Ready_ = false;
     fsr3Ready_ = false;
     fsr3L1_[0].Reset(); fsr3L1_[1].Reset(); fsr3L2_[0].Reset(); fsr3L2_[1].Reset(); fsr3G2_.Reset(); fsr3G1_.Reset();
     fsrBlk_.Reset();
@@ -1727,6 +1810,14 @@ bool Host::InitFsrTemporal()
     srv(fsrBlk_.Get(), DXGI_FORMAT_R16G16_FLOAT, 16);
 
     // Motion3: the brightness pyramid, the coarse vector grids, and the descriptor sets of its five passes (slots 17..56)
+    f5Ready_ = false;
+    f5SrvGuide_ = f5SrvMask_ = nullptr;
+    if (f5Pipes_)
+    {
+        f5Flow_.Reset();
+        f5Trust_.Reset();
+        f5Ready_ = true;
+    }
     fsr3Ready_ = false;
     if (fsr3Pipes_)
     {
@@ -2033,7 +2124,84 @@ void Host::RecordFsrTemporal()
     list_->SetComputeRootDescriptorTable(1, slot(fsrCur_ == 0 ? 7 : 14)); // current frame, frame before, block vectors
     list_->SetComputeRootDescriptorTable(2, slot(10));
 
-    if (fsr3Ready_)
+    // Motion4: dense optical flow and trust mask (src/f5low). On the first frame (no flow yet) or on any failure the old search below runs.
+    bool f5Done = false;
+    if (f5Ready_)
+    {
+        const bool flowOk = f5Flow_.Dispatch(list_.Get(), curTex, kFormat, nullptr, DXGI_FORMAT_UNKNOWN, true, OpticalFlowDx12::Encoding::Srgb);
+        if (flowOk && f5Flow_.FlowValid() && f5Flow_.FlowWidth() > 0)
+        {
+            TrustMaskDx12::Inputs in{};
+            in.flow = f5Flow_.Flow();
+            in.flowWidth = f5Flow_.FlowWidth();
+            in.flowHeight = f5Flow_.FlowHeight();
+            in.fullPerFlow = static_cast<float>(width_) / static_cast<float>(in.flowWidth);
+            in.lumaNow = f5Flow_.LumaOfLastFrame();
+            in.lumaBefore = f5Flow_.LumaOfFrameBefore();
+            in.sceneCut = f5Flow_.SceneCutFlag();
+            if (f5Trust_.Dispatch(list_.Get(), in) && f5Trust_.BuildGuides(list_.Get(), in, width_, height_) && f5Trust_.GuideMotion() &&
+                f5Trust_.Mask())
+            {
+                // their passes changed the heaps and root signature on the list: ours again
+                list_->SetDescriptorHeaps(1, heaps);
+                list_->SetComputeRootSignature(fsrRoot_.Get());
+                ID3D12Resource* guide = f5Trust_.GuideMotion();
+                ID3D12Resource* mask = f5Trust_.Mask();
+                if (guide != f5SrvGuide_ || mask != f5SrvMask_)
+                {
+                    WaitGpu(); // the descriptors are rewritten only when their textures changed (a size change)
+                    auto cpuAt = [&](UINT n) {
+                        D3D12_CPU_DESCRIPTOR_HANDLE h = upSrvHeap_->GetCPUDescriptorHandleForHeapStart();
+                        h.ptr += static_cast<SIZE_T>(upSrvInc_) * n;
+                        return h;
+                    };
+                    auto mk = [&](ID3D12Resource* r, DXGI_FORMAT fmt, UINT n) {
+                        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+                        sv.Format = fmt;
+                        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                        sv.Texture2D.MipLevels = 1;
+                        dev12_->CreateShaderResourceView(r, &sv, cpuAt(n));
+                    };
+                    mk(guide, DXGI_FORMAT_R16G16B16A16_FLOAT, 57);
+                    mk(mask, DXGI_FORMAT_R8_UNORM, 58);
+                    mk(mask, DXGI_FORMAT_R8_UNORM, 59);
+                    f5SrvGuide_ = guide;
+                    f5SrvMask_ = mask;
+                }
+                list_->SetComputeRoot32BitConstants(0, 4, consts, 0);
+                list_->SetComputeRootDescriptorTable(1, slot(57));
+                list_->SetComputeRootDescriptorTable(2, slot(10));
+                barrier(fsrMv_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                barrier(fsrDepth_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                barrier(fsrReact_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                list_->SetPipelineState(f5ResamplePso_.Get());
+                list_->Dispatch((width_ + 7) / 8, (height_ + 7) / 8, 1);
+                barrier(fsrMv_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+                barrier(fsrDepth_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+                barrier(fsrReact_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+                f5Done = true;
+            }
+            else
+            {
+                list_->SetDescriptorHeaps(1, heaps);
+                list_->SetComputeRootSignature(fsrRoot_.Get());
+            }
+        }
+        else
+        {
+            list_->SetDescriptorHeaps(1, heaps);
+            list_->SetComputeRootSignature(fsrRoot_.Get());
+        }
+        if (!f5Done)
+        {
+            list_->SetComputeRoot32BitConstants(0, 4, consts, 0);
+            list_->SetComputeRootDescriptorTable(1, slot(fsrCur_ == 0 ? 7 : 14));
+            list_->SetComputeRootDescriptorTable(2, slot(10));
+        }
+    }
+
+    if (!f5Done && fsr3Ready_)
     {
         // Motion3: the old block search plus temporal steadiness (fsr_flow3_shader.h); then back to the usual root signature
         const UINT p = static_cast<UINT>(fsrCur_);
@@ -2058,7 +2226,7 @@ void Host::RecordFsrTemporal()
         list_->SetComputeRootDescriptorTable(1, slot(fsrCur_ == 0 ? 7 : 14));
         list_->SetComputeRootDescriptorTable(2, slot(10));
     }
-    else
+    else if (!f5Done)
     {
         barrier(fsrBlk_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list_->SetPipelineState(fsrBlockPso_.Get());
@@ -2066,14 +2234,17 @@ void Host::RecordFsrTemporal()
         barrier(fsrBlk_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
     }
 
-    barrier(fsrMv_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    barrier(fsrDepth_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    barrier(fsrReact_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    list_->SetPipelineState(fsrPixelPso_.Get());
-    list_->Dispatch((width_ + 7) / 8, (height_ + 7) / 8, 1);
-    barrier(fsrMv_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
-    barrier(fsrDepth_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
-    barrier(fsrReact_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+    if (!f5Done)
+    {
+        barrier(fsrMv_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        barrier(fsrDepth_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        barrier(fsrReact_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        list_->SetPipelineState(fsrPixelPso_.Get());
+        list_->Dispatch((width_ + 7) / 8, (height_ + 7) / 8, 1);
+        barrier(fsrMv_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+        barrier(fsrDepth_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+        barrier(fsrReact_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+    }
 
     const auto now = std::chrono::steady_clock::now();
     float frameMs = static_cast<float>(std::chrono::duration<double, std::milli>(now - fsrLast_).count());

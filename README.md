@@ -8,7 +8,7 @@
 [![Latest release](https://img.shields.io/github/v/release/REPLACE_OWNER/REPLACE_REPO?style=for-the-badge&label=download)](../../releases/latest)
 [![Build](https://img.shields.io/github/actions/workflow/status/REPLACE_OWNER/REPLACE_REPO/build.yml?style=for-the-badge&label=build)](../../actions)
 [![Platform](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078d4?style=for-the-badge)](#requirements)
-[![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=for-the-badge)](LICENSE)
 [![Telegram](https://img.shields.io/badge/Telegram-MKJH__APPS-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/MKJH_APPS)
 
 **by MK-JH**
@@ -107,6 +107,7 @@ src/
   fsr_flow_shader.h      motion vectors, version 1 (block search)
   fsr_flow2_shader.h     per-pixel pass used by version 3
   fsr_flow3_shader.h     motion vectors, version 3 (version 1 + temporal steadiness)
+  f5low/                 motion vectors, version 4: dense optical flow + trust mask (see NOTICE.md)
 third_party/ffx/         AMD FidelityFX API headers       (MIT)
 ```
 
@@ -146,6 +147,7 @@ Pull requests and issues are welcome. Please:
 |---|---|
 | FSR 1 EASU/RCAS shader code, FidelityFX API headers (AMD) | MIT |
 | NVIDIA Image Scaling (NIS) shader code | MIT |
+| `src/f5low/` optical flow, scene-cut and trust-mask code (from [OptiScaler-F5-DLSSNR-Multipass](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass)) | GPL-3.0, see [NOTICE.md](NOTICE.md) |
 | NVIDIA NGX / DLSS SDK headers | NVIDIA's licence; **downloaded at build time, not in this repo** |
 | OptiScaler, AMD / NVIDIA / Intel runtimes | their own licences; not included |
 
@@ -157,7 +159,10 @@ Telegram **[@MKJH_APPS](https://t.me/MKJH_APPS)** · bugs and ideas: [issues](..
 
 ## License
 
-[MIT](LICENSE) © MK-JH
+OptiCaptureHost is free software under the **GNU General Public License v3.0** ([LICENSE](LICENSE)), © MK-JH.
+Version 4 of the motion vectors includes GPL-3.0 code from OptiScaler-F5-DLSSNR-Multipass, so the whole program is distributed under the GPL-3.0:
+you may use, study, change and share it, and anything you distribute that is based on it must stay GPL-3.0 with its source available.
+Third-party components keep their own licences (table above).
 
 ---
 
