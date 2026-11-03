@@ -5,8 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-add_executable(OptiCaptureHost WIN32 src/main.cpp src/host.rc
-    src/f5low/motion/OpticalFlow_Dx12.cpp src/f5low/motion/SceneCut_Dx12.cpp src/f5low/motion/TrustMask_Dx12.cpp)
+add_executable(OptiCaptureHost WIN32 src/main.cpp src/host.rc)
 
 target_compile_definitions(OptiCaptureHost PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(OptiCaptureHost PRIVATE /W4 /permissive- /EHsc /utf-8)

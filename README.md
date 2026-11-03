@@ -54,7 +54,7 @@ The project has two programs:
   | Bilinear | Plain scaling |
 
   Levels: **Native (1x)**, **Quality (1.5x)**, **Balanced (1.7x)**, **Performance (2x)**.
-- **The host measures motion itself.** A window capture has no motion vectors, so the host estimates them from consecutive frames on the GPU (block matching, sub-pixel refinement, temporal steadiness, a reactive mask). Two versions can be chosen in the launcher.
+- **The host measures motion itself.** A window capture has no motion vectors, so the host estimates them from consecutive frames on the GPU (block matching, sub-pixel refinement, temporal steadiness, a reactive mask).
 - **Opti Upscaler selector** — FSR 3.1.5, FSR 4.1.2, DLSS 3.7, DittoSR, XeSS, DLSS; picking one writes `OptiScaler.ini` and copies that upscaler's folder next to the exes.
 - Built-in frame limiter, low-latency present modes, VSync on/off/auto, configurable hotkeys, live status panel.
 
@@ -104,16 +104,13 @@ src/
   version.h              the one place for the version number
   upscale_shader.h       FSR 1 (EASU/RCAS) shaders        (AMD, MIT)
   nis_shader.h/_config.h NVIDIA Image Scaling             (NVIDIA, MIT)
-  fsr_flow_shader.h      motion vectors, version 1 (block search)
-  fsr_flow2_shader.h     per-pixel pass used by version 3
-  fsr_flow3_shader.h     motion vectors, version 3 (version 1 + temporal steadiness)
-  f5low/                 motion vectors, version 4: dense optical flow + trust mask (see NOTICE.md)
+  fsr_flow_shader.h      motion vectors (block search + per-pixel pass)
 third_party/ffx/         AMD FidelityFX API headers       (MIT)
 ```
 
 ### Where to work
 
-- **Motion estimation** (the biggest quality lever for DLSS / FSR 3): `fsr_flow*_shader.h`. New ideas go in a **new, switchable module**, with the old one kept — see how version 3 is wired (`MotionVersion` in `settings.h`, the launcher selector).
+- **Motion estimation** (the biggest quality lever for DLSS / FSR 3): `fsr_flow_shader.h`. New ideas should go in a **new, switchable module**, with the current one kept.
 - **Launcher options:** add an id in `launcher.cpp`, draw it in `Paint`, handle it in `OnClick`, store it in `settings.h`.
 - Keep `motionVectorScale` at `{1, -1}`; the vectors point from a pixel to where it was in the previous frame.
 
@@ -147,7 +144,6 @@ Pull requests and issues are welcome. Please:
 |---|---|
 | FSR 1 EASU/RCAS shader code, FidelityFX API headers (AMD) | MIT |
 | NVIDIA Image Scaling (NIS) shader code | MIT |
-| `src/f5low/` optical flow, scene-cut and trust-mask code (from [OptiScaler-F5-DLSSNR-Multipass](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass)) | GPL-3.0, see [NOTICE.md](NOTICE.md) |
 | NVIDIA NGX / DLSS SDK headers | NVIDIA's licence; **downloaded at build time, not in this repo** |
 | OptiScaler, AMD / NVIDIA / Intel runtimes | their own licences; not included |
 
@@ -159,8 +155,7 @@ Telegram **[@MKJH_APPS](https://t.me/MKJH_APPS)** · bugs and ideas: [issues](..
 
 ## License
 
-OptiCaptureHost is free software under the **GNU General Public License v3.0** ([LICENSE](LICENSE)), © MK-JH.
-Version 4 of the motion vectors includes GPL-3.0 code from OptiScaler-F5-DLSSNR-Multipass, so the whole program is distributed under the GPL-3.0:
+OptiCaptureHost is free software under the **GNU General Public License v3.0** ([LICENSE](LICENSE)), © MK-JH:
 you may use, study, change and share it, and anything you distribute that is based on it must stay GPL-3.0 with its source available.
 Third-party components keep their own licences (table above).
 

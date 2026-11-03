@@ -57,7 +57,7 @@ constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host'
 constexpr const wchar_t* kVersion = L"" OC_VER_STR;
 
 constexpr float kW = 796.0f; // client size in logical pixels (scaled by the DPI)
-constexpr float kH = 804.0f;
+constexpr float kH = 770.0f;
 
 constexpr UINT_PTR kTimerList = 1;
 constexpr UINT_PTR kTimerHost = 2;
@@ -100,8 +100,6 @@ constexpr int kIdUpResize = 32;
 constexpr int kIdUpSlider = 33;
 constexpr int kIdProfSlot0 = 34; // 34..37: profile slots 1..4
 constexpr int kIdProfileLoad = 38;
-constexpr int kIdMotionSelect = 39;
-constexpr int kMotionMenuBase = 6000;
 constexpr int kIdPreset0 = 40; // 40..46: quick modes NO FG, x2 / x3 / x4 (new GPU: Intel MFG), x2 / x3 / x4 (old GPU: Artur)
 constexpr int kUpMenuBase = 5900;
 const wchar_t* const kFgNames[11] = {
@@ -936,7 +934,21 @@ std::string OwnExeName()
 
 // The RTSS frame limiter. Only one profile is changed at a time; its old values are kept in the .ini and put back when
 // the limiter is switched off or moved to another target. hz = refresh rate of the game's monitor.
+LimiterOut DoLimiterImpl(RtssApi& api, const oc::Settings& st, const std::wstring& gameExe, int hz, bool off);
+
+// The limiter as asked. When the limiter target is not the host, the host program's own RTSS profile (OptiCaptureHost.exe) is put to limit 0.
 LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& gameExe, int hz, bool off)
+{
+    LimiterOut out = DoLimiterImpl(api, st, gameExe, hz, off);
+    if (api.mod && st.limitTarget != 2)
+    {
+        const std::string host = Narrow(kHostExe);
+        api.Write(host, 0, 1, api.Read(host, "SyncLimiter", 0));
+    }
+    return out;
+}
+
+LimiterOut DoLimiterImpl(RtssApi& api, const oc::Settings& st, const std::wstring& gameExe, int hz, bool off)
 {
     LimiterOut out;
     const std::wstring ini = oc::SettingsPath();
@@ -1008,7 +1020,7 @@ LimiterOut DoLimiter(RtssApi& api, const oc::Settings& st, const std::wstring& g
     // notice a profile that is rewritten twice within a moment, and an Off followed by an Apply always worked.
     if (!off && st.limitTarget != 0)
     {
-        const LimiterOut o = DoLimiter(api, st, gameExe, hz, true);
+        const LimiterOut o = DoLimiterImpl(api, st, gameExe, hz, true);
         if (o.code == 1 && !IsElevated())
             return o; // not allowed to write: the caller repeats everything from an elevated copy
         Sleep(1100);
@@ -3312,27 +3324,6 @@ void App::OnClick(int id)
             }
         }
     }
-    else if (id == kIdMotionSelect)
-    {
-        static const wchar_t* mv[] = { L"Version 1  (the old block search)", L"", L"Version 3  (old search + temporal steadiness)",
-                                       L"Version 4  (dense optical flow + trust mask, experimental)" };
-        HMENU menu = CreatePopupMenu();
-        if (menu)
-        {
-            for (int v = 1; v <= 4; v += (v == 1 ? 2 : 1))
-                AppendMenuW(menu, MF_STRING | (st_.motionVer == v ? MF_CHECKED : 0), kMotionMenuBase + v, mv[v - 1]);
-            POINT pt{};
-            GetCursorPos(&pt);
-            const UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd_, nullptr);
-            DestroyMenu(menu);
-            if (cmd == kMotionMenuBase + 1 || cmd == kMotionMenuBase + 3 || cmd == kMotionMenuBase + 4)
-            {
-                st_.motionVer = static_cast<int>(cmd - kMotionMenuBase);
-                Save();
-                SetNote(std::wstring(L"Motion vectors: ") + mv[st_.motionVer - 1] + (Running() ? L". Applies the next time you press START." : L"."), Note::Ok);
-            }
-        }
-    }
     else if (id == kIdLimitOff)
     {
         st_.limitAuto = 0; // otherwise START would switch it on again
@@ -4035,20 +4026,6 @@ void App::Paint(HDC dc, int W, int H)
             AddHit(rb, kIdUpResize);
     }
 
-    // ---- motion vector version (FSR3/4 and DLSS output scaling) ----
-    {
-        const bool used = st_.upscale >= 4;
-        Text(g, L"Motion vectors", *f_.bodyB, R(44, 831, 130, 24), used ? col::Text() : col::Muted());
-        const gp::RectF selector = R(176, 827, 328, 30);
-        const bool hot = hover_ == kIdMotionSelect;
-        FillRound(g, selector, S(8), hot ? col::RowHot() : col::Row());
-        StrokeRound(g, selector, S(8), hot ? col::Accent() : col::Line(), max(1.0f, S(1)));
-        static const wchar_t* mvShort[] = { L"Version 1", L"Version 3", L"Version 3", L"Version 4  (experimental)" };
-        Text(g, mvShort[(st_.motionVer >= 1 && st_.motionVer <= 4) ? st_.motionVer - 1 : 2], *f_.chip, R(186, 831, 308, 22),
-             used ? col::Text() : col::Muted());
-        AddHit(selector, kIdMotionSelect);
-    }
-
     // ---- sharpness slider (FSR 1: RCAS, NIS: sharpness); bilinear has none ----
     {
         const bool has = st_.upscale >= 2;
@@ -4365,11 +4342,11 @@ void App::Paint(HDC dc, int W, int H)
     // ---- footer ----
     {
         gp::Pen line(col::Line(), max(1.0f, S(1)));
-        g.DrawLine(&line, S(24), S(862), S(912), S(862));
+        g.DrawLine(&line, S(24), S(822), S(912), S(822));
 
         // Links panel: a framed card with four chips (icon, small label, value).
         {
-            const gp::RectF panel = R(24, 896, 626, 42);
+            const gp::RectF panel = R(24, 856, 626, 42);
             Card(g, panel);
             struct LinkChip { const wchar_t* label; const wchar_t* value; float x; float w; int id; bool heart; };
             static const LinkChip chips[] = {
@@ -4380,17 +4357,17 @@ void App::Paint(HDC dc, int W, int H)
             };
             for (const LinkChip& c : chips)
             {
-                const gp::RectF chip = R(c.x, 900, c.w, 34);
+                const gp::RectF chip = R(c.x, 860, c.w, 34);
                 const bool hot = hover_ == c.id;
                 const gp::Color tone = c.heart ? gp::Color(255, 255, 110, 140) : col::Accent();
                 FillRound(g, chip, S(9), hot ? col::Alpha(tone, 46) : col::Row());
                 StrokeRound(g, chip, S(9), hot ? tone : col::Line(), max(1.0f, S(1)));
                 if (c.heart)
-                    DrawHeart(g, R(c.x + 8, 906, 22, 22));
+                    DrawHeart(g, R(c.x + 8, 866, 22, 22));
                 else
-                    DrawPlane(g, R(c.x + 8, 906, 22, 22));
-                Text(g, c.label, *f_.tiny, R(c.x + 36, 902, c.w - 40, 14), col::Muted());
-                Text(g, c.value, hot ? *f_.link : *f_.linkN, R(c.x + 36, 914, c.w - 40, 18), hot ? (c.heart ? tone : col::Accent2()) : tone);
+                    DrawPlane(g, R(c.x + 8, 866, 22, 22));
+                Text(g, c.label, *f_.tiny, R(c.x + 36, 862, c.w - 40, 14), col::Muted());
+                Text(g, c.value, hot ? *f_.link : *f_.linkN, R(c.x + 36, 874, c.w - 40, 18), hot ? (c.heart ? tone : col::Accent2()) : tone);
                 AddHit(chip, c.id);
             }
         }
@@ -4416,10 +4393,10 @@ void App::Paint(HDC dc, int W, int H)
         {
             status = L"Pick a game from the list to begin.";
         }
-        Text(g, status, *f_.sm, R(24, 868, 640, 28), tone, 0, true);
+        Text(g, status, *f_.sm, R(24, 828, 640, 28), tone, 0, true);
 
         const bool noPick = !running && (selected_ < 0 || selected_ >= static_cast<int>(games_.size()));
-        Button(g, R(672, 892, 240, 46), running ? (stopping_ ? L"STOPPING\u2026" : L"STOP") : L"START", noPick, running);
+        Button(g, R(672, 852, 240, 46), running ? (stopping_ ? L"STOPPING\u2026" : L"STOP") : L"START", noPick, running);
     }
 
     // ---- warning dialog (on top of everything) ----

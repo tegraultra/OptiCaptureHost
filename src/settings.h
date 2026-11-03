@@ -35,12 +35,6 @@ struct Settings
     UINT fpsCycleKey = VK_NEXT;  // FPS overlay type (FpsCycleShortcutKey)
     UINT fgKey = VK_END;         // frame generation on/off (FGShortcutKey)
     int presentMode = 3;      // 0 auto (FG on: no wait, FG off: VSync), 1 always interval 0, 2 always interval 1, 3 classic 2.2.0 behaviour, 4 Lossless-style (tearing, latency 1), 5 classic + exactly refresh/2 base frames, 6 classic + unlimited capture (no half-refresh limit)
-    int motion4Mask = 100;    // Motion4: how much of the trust mask goes into the reactive mask, percent; [Upscale] Motion4Mask
-    int motion4Tol = 150;     // Motion4: where the F5 flow and the block search differ by more than this (1/100 pixel) the block search wins; 0 = F5 only; [Upscale] Motion4Tol
-    int motion4 = 0;          // Motion4 (src/f5low): dense optical flow + trust mask; [Upscale] MotionVersion=4
-    int motionVer = 3;        // motion vector version for FSR3/4 and DLSS output scaling: 1 old search, 2 Motion2, 3 Motion3; [Upscale] MotionVersion
-    int motion3 = 0;          // Motion3 experiment (fsr_flow3_shader.h): multi-scale motion vectors; [Upscale] Motion3
-    int motion2 = 0;          // Motion2 experiment (fsr_flow2_shader.h): steadier motion vectors; [Upscale] Motion2
     int dlssPreset = 0;       // DLSS model (preset): 0 auto (L when upscaling, E at 1:1), 5 E, 10 J, 11 K, 12 L, 13 M; [Upscale] DlssPreset
     int upscale = 0;          // output scaling: 0 off, 1 bilinear, 2 FSR1 (EASU+RCAS), 3 NIS, 4 FSR3/4 (motion measured from the frames + AMD runtime); read at start
     int upscaleLevel = 0;     // input size: 0 Quality 67%, 1 Balanced 58%, 2 Performance 50%, 3 Native 100% (FSR3/4 only: anti-aliasing, no resize)
@@ -121,18 +115,6 @@ inline void LoadSettings(Settings& s)
     if (s.presentMode < 0 || s.presentMode > 6) s.presentMode = 3;
     s.upscale = GetPrivateProfileIntW(L"Upscale", L"Method", 0, path.c_str());
     if (s.upscale < 0 || s.upscale > 5) s.upscale = 0;
-    s.motion2 = GetPrivateProfileIntW(L"Upscale", L"Motion2", 0, path.c_str()) != 0 ? 1 : 0; // Motion2
-    s.motionVer = GetPrivateProfileIntW(L"Upscale", L"MotionVersion", 3, path.c_str());
-    if (s.motionVer != 1 && s.motionVer != 4) s.motionVer = 3; // version 2 was removed
-    s.motion4 = s.motionVer == 4 ? 1 : 0;
-    s.motion4Mask = GetPrivateProfileIntW(L"Upscale", L"Motion4Mask", 100, path.c_str());
-    s.motion4Tol = GetPrivateProfileIntW(L"Upscale", L"Motion4Tol", 150, path.c_str());
-    if (s.motion4Tol < 0) s.motion4Tol = 0;
-    if (s.motion4Tol > 5000) s.motion4Tol = 5000;
-    if (s.motion4Mask < 0) s.motion4Mask = 0;
-    if (s.motion4Mask > 200) s.motion4Mask = 200;
-    s.motion2 = s.motionVer == 2 ? 1 : 0; // Motion2
-    s.motion3 = s.motionVer == 3 ? 1 : 0; // Motion3
     s.dlssPreset = GetPrivateProfileIntW(L"Upscale", L"DlssPreset", 0, path.c_str());
     if (s.dlssPreset < 0 || s.dlssPreset > 16) s.dlssPreset = 0;
     s.upscaleLevel = GetPrivateProfileIntW(L"Upscale", L"Level", 0, path.c_str());
@@ -195,11 +177,6 @@ inline void SaveSettings(const Settings& s)
     WritePrivateProfileStringW(L"Advanced", L"PresentMode", std::to_wstring(s.presentMode).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Upscale", L"Method", std::to_wstring(s.upscale).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Upscale", L"Level", std::to_wstring(s.upscaleLevel).c_str(), path.c_str());
-    WritePrivateProfileStringW(L"Upscale", L"Motion2", std::to_wstring(s.motionVer == 2 ? 1 : 0).c_str(), path.c_str()); // Motion2
-    WritePrivateProfileStringW(L"Upscale", L"Motion4Tol", std::to_wstring(s.motion4Tol).c_str(), path.c_str());
-    WritePrivateProfileStringW(L"Upscale", L"Motion4Mask", std::to_wstring(s.motion4Mask).c_str(), path.c_str());
-    WritePrivateProfileStringW(L"Upscale", L"MotionVersion", std::to_wstring(s.motionVer).c_str(), path.c_str());
-    WritePrivateProfileStringW(L"Upscale", L"Motion3", std::to_wstring(s.motionVer == 3 ? 1 : 0).c_str(), path.c_str()); // Motion3
     WritePrivateProfileStringW(L"Upscale", L"DlssPreset", std::to_wstring(s.dlssPreset).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Upscale", L"NisSharpness", std::to_wstring(s.nisSharp).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Upscale", L"LabelSeconds", std::to_wstring(s.labelSeconds).c_str(), path.c_str());
