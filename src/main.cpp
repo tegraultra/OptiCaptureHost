@@ -1537,7 +1537,7 @@ bool Host::InitFsrPipelines()
     if (!(make("CSBlock", fsrBlockPso_) && make("CSPixel", fsrPixelPso_)))
         return false;
     fsr3Pipes_ = false;
-    if (st_.motion3)
+    if (st_.motion3 || (st_.motion4 && st_.motion4Tol > 0)) // Motion 4 uses the block search as its fallback
         fsr3Pipes_ = InitMotion3Pipelines();
     f5Pipes_ = false;
     if (st_.motion4)
@@ -1550,7 +1550,7 @@ bool Host::InitFsrPipelines()
 static const char kF5ResampleHlsl[] = R"HLSL(
 Texture2D<float4> gGuide : register(t0);  // the flow at the picture's size, towards the previous frame, in pixels
 Texture2D<float> gMask : register(t1);    // the trust mask at the flow's size: 0 trust the history, 1 do not
-Texture2D<float> gUnused : register(t2);
+Texture2D<float2> gBlkIn : register(t2);   // the block search vectors (quarter size), pixels; the hybrid fallback
 RWTexture2D<float2> uBlk : register(u0);
 RWTexture2D<float2> uMv : register(u1);
 RWTexture2D<float> uDepth : register(u2);
@@ -1562,7 +1562,30 @@ void CSResample(uint3 id : SV_DispatchThreadID)
     if (id.x >= gW || id.y >= gH) return;
     uint gw, gh; gGuide.GetDimensions(gw, gh);
     const int2 gp = min(int2(id.xy), int2(gw, gh) - 1);
-    uMv[id.xy] = gGuide.Load(int3(gp, 0)).xy;
+    float2 mv = gGuide.Load(int3(gp, 0)).xy;
+    float extra = 0.0;
+    if (gBH > 0)
+    {
+        // hybrid: the F5 flow has no depth here and goes wrong on big flat surfaces such as the ground; where it disagrees with the
+        // block search the block search (steady, tested) is used instead
+        uint bw, bh; gBlkIn.GetDimensions(bw, bh);
+        const float2 bf = (float2(id.xy) - 2.0) / 4.0;
+        const int2 b0 = int2(floor(bf));
+        const float2 bt = saturate(bf - float2(b0));
+        const int2 bm = int2(bw, bh) - 1;
+        const float2 v00 = gBlkIn.Load(int3(clamp(b0, int2(0, 0), bm), 0));
+        const float2 v10 = gBlkIn.Load(int3(clamp(b0 + int2(1, 0), int2(0, 0), bm), 0));
+        const float2 v01 = gBlkIn.Load(int3(clamp(b0 + int2(0, 1), int2(0, 0), bm), 0));
+        const float2 v11 = gBlkIn.Load(int3(clamp(b0 + int2(1, 1), int2(0, 0), bm), 0));
+        const float2 bv = lerp(lerp(v00, v10, bt.x), lerp(v01, v11, bt.x), bt.y);
+        const float tol = float(gBH) * 0.01 + 0.1 * length(bv);
+        if (length(mv - bv) > tol)
+        {
+            mv = bv;
+            extra = 0.95 * saturate((length(bv) - 1.5) / 6.0);
+        }
+    }
+    uMv[id.xy] = mv;
     uDepth[id.xy] = 0.5; // the capture has no depth
     uint mw, mh; gMask.GetDimensions(mw, mh);
     const float2 f = (float2(id.xy) + 0.5) * float2(mw, mh) / float2(gW, gH) - 0.5;
@@ -1573,7 +1596,7 @@ void CSResample(uint3 id : SV_DispatchThreadID)
     const float b = gMask.Load(int3(clamp(i0 + int2(1, 0), int2(0, 0), hi), 0));
     const float c = gMask.Load(int3(clamp(i0 + int2(0, 1), int2(0, 0), hi), 0));
     const float d = gMask.Load(int3(clamp(i0 + int2(1, 1), int2(0, 0), hi), 0));
-    uReact[id.xy] = saturate(lerp(lerp(a, b, t.x), lerp(c, d, t.x), t.y) * (float(gBW) * 0.01)); // gBW: percent of the trust mask
+    uReact[id.xy] = saturate(max(extra, lerp(lerp(a, b, t.x), lerp(c, d, t.x), t.y) * (float(gBW) * 0.01))); // gBW: percent of the trust mask
 }
 )HLSL";
 
@@ -2124,6 +2147,30 @@ void Host::RecordFsrTemporal()
     list_->SetComputeRootDescriptorTable(1, slot(fsrCur_ == 0 ? 7 : 14)); // current frame, frame before, block vectors
     list_->SetComputeRootDescriptorTable(2, slot(10));
 
+    // Motion3's block search plus steadiness; leaves fsrBlk_ readable and the usual root signature set
+    auto runBlock3 = [&]() {
+        const UINT p = static_cast<UINT>(fsrCur_);
+        const D3D12_RESOURCE_STATES uavS = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        list_->SetComputeRootSignature(fsr3Root_.Get());
+        const UINT c3[8] = { bw, bh, width_, height_, bw, bh, 0, 0 };
+        list_->SetComputeRoot32BitConstants(0, 8, c3, 0);
+        const UINT base3 = 17 + (p * 5 + 4) * 4;
+        list_->SetComputeRootDescriptorTable(1, slot(base3));
+        list_->SetComputeRootDescriptorTable(2, slot(base3 + 3));
+        barrier(fsrBlk_.Get(), nps, uavS);
+        list_->SetPipelineState(fsr3Block_.Get());
+        list_->Dispatch((bw + 7) / 8, (bh + 7) / 8, 1);
+        barrier(fsrBlk_.Get(), uavS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        barrier(fsr3G1_.Get(), nps, D3D12_RESOURCE_STATE_COPY_DEST);
+        list_->CopyResource(fsr3G1_.Get(), fsrBlk_.Get());
+        barrier(fsr3G1_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, nps);
+        barrier(fsrBlk_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, nps);
+        list_->SetComputeRootSignature(fsrRoot_.Get());
+        list_->SetComputeRoot32BitConstants(0, 4, consts, 0);
+        list_->SetComputeRootDescriptorTable(1, slot(fsrCur_ == 0 ? 7 : 14));
+        list_->SetComputeRootDescriptorTable(2, slot(10));
+    };
+
     // Motion4: dense optical flow and trust mask (src/f5low). On the first frame (no flow yet) or on any failure the old search below runs.
     bool f5Done = false;
     if (f5Ready_)
@@ -2165,11 +2212,13 @@ void Host::RecordFsrTemporal()
                     };
                     mk(guide, DXGI_FORMAT_R16G16B16A16_FLOAT, 57);
                     mk(mask, DXGI_FORMAT_R8_UNORM, 58);
-                    mk(mask, DXGI_FORMAT_R8_UNORM, 59);
+                    mk(fsrBlk_.Get(), DXGI_FORMAT_R16G16_FLOAT, 59);
                     f5SrvGuide_ = guide;
                     f5SrvMask_ = mask;
                 }
-                const UINT consts4[4] = { width_, height_, static_cast<UINT>(st_.motion4Mask), 0 };
+                const bool hybrid = fsr3Ready_ && st_.motion4Tol > 0;
+                if (hybrid) runBlock3();
+                const UINT consts4[4] = { width_, height_, static_cast<UINT>(st_.motion4Mask), hybrid ? static_cast<UINT>(st_.motion4Tol) : 0u };
                 list_->SetComputeRoot32BitConstants(0, 4, consts4, 0);
                 list_->SetComputeRootDescriptorTable(1, slot(57));
                 list_->SetComputeRootDescriptorTable(2, slot(10));
