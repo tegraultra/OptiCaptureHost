@@ -1509,14 +1509,15 @@ bool Host::InitFsrPipelines()
         ComPtr<ID3DBlob> cs, e;
         // Motion2: the block pass of fsr_flow_shader.h plus the steadier pixel pass of fsr_flow2_shader.h
         std::string src(kFsrFlowHlsl);
-        if (st_.motion2 || st_.motion3)
+        const bool hybridPix = st_.motion4 && st_.motion4Tol > 0; // Motion 4 falls back to the Motion3 pixel pass
+        if (st_.motion2 || st_.motion3 || hybridPix)
         {
             const size_t cut = src.find("// ---- pass 2");
             if (cut != std::string::npos)
                 src = src.substr(0, cut) + kFsrFlow2Pass2;
         }
         const D3D_SHADER_MACRO defs[] = { { "OC_MOTION_REACT", "1" }, { nullptr, nullptr } };
-        const HRESULT h = D3DCompile(src.c_str(), src.size(), "fsr_flow.hlsl", st_.motion3 ? defs : nullptr, nullptr, entry, "cs_5_0",
+        const HRESULT h = D3DCompile(src.c_str(), src.size(), "fsr_flow.hlsl", (st_.motion3 || hybridPix) ? defs : nullptr, nullptr, entry, "cs_5_0",
                                      D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &cs, &e);
         if (FAILED(h))
         {
@@ -1563,28 +1564,17 @@ void CSResample(uint3 id : SV_DispatchThreadID)
     uint gw, gh; gGuide.GetDimensions(gw, gh);
     const int2 gp = min(int2(id.xy), int2(gw, gh) - 1);
     float2 mv = gGuide.Load(int3(gp, 0)).xy;
-    float extra = 0.0;
+    bool keepOld = false;
     if (gBH > 0)
     {
-        // hybrid: the F5 flow has no depth here and goes wrong on big flat surfaces such as the ground; where it disagrees with the
-        // block search the block search (steady, tested) is used instead
-        uint bw, bh; gBlkIn.GetDimensions(bw, bh);
-        const float2 bf = (float2(id.xy) - 2.0) / 4.0;
-        const int2 b0 = int2(floor(bf));
-        const float2 bt = saturate(bf - float2(b0));
-        const int2 bm = int2(bw, bh) - 1;
-        const float2 v00 = gBlkIn.Load(int3(clamp(b0, int2(0, 0), bm), 0));
-        const float2 v10 = gBlkIn.Load(int3(clamp(b0 + int2(1, 0), int2(0, 0), bm), 0));
-        const float2 v01 = gBlkIn.Load(int3(clamp(b0 + int2(0, 1), int2(0, 0), bm), 0));
-        const float2 v11 = gBlkIn.Load(int3(clamp(b0 + int2(1, 1), int2(0, 0), bm), 0));
-        const float2 bv = lerp(lerp(v00, v10, bt.x), lerp(v01, v11, bt.x), bt.y);
-        const float tol = float(gBH) * 0.01 + 0.1 * length(bv);
-        if (length(mv - bv) > tol)
-        {
-            mv = bv;
-            extra = 0.95 * saturate((length(bv) - 1.5) / 6.0);
-        }
+        // hybrid: uMv / uReact already hold the Motion3 per-pixel result. The F5 flow has no depth here and goes wrong on big surfaces such
+        // as the ground; where it disagrees with that result the Motion3 vector and its reactive value stay as they are
+        const float2 old = uMv[id.xy];
+        if (length(mv - old) > float(gBH) * 0.01 + 0.1 * length(old))
+            keepOld = true;
     }
+    if (keepOld) return;
+    const float extra = 0.0;
     uMv[id.xy] = mv;
     uDepth[id.xy] = 0.5; // the capture has no depth
     uint mw, mh; gMask.GetDimensions(mw, mh);
@@ -2217,7 +2207,19 @@ void Host::RecordFsrTemporal()
                     f5SrvMask_ = mask;
                 }
                 const bool hybrid = fsr3Ready_ && st_.motion4Tol > 0;
-                if (hybrid) runBlock3();
+                if (hybrid)
+                {
+                    // Motion3's block search and per-pixel pass first; the F5 flow then replaces only where it agrees
+                    runBlock3();
+                    barrier(fsrMv_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    barrier(fsrDepth_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    barrier(fsrReact_.Get(), nps, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    list_->SetPipelineState(fsrPixelPso_.Get());
+                    list_->Dispatch((width_ + 7) / 8, (height_ + 7) / 8, 1);
+                    barrier(fsrMv_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+                    barrier(fsrDepth_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+                    barrier(fsrReact_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+                }
                 const UINT consts4[4] = { width_, height_, static_cast<UINT>(st_.motion4Mask), hybrid ? static_cast<UINT>(st_.motion4Tol) : 0u };
                 list_->SetComputeRoot32BitConstants(0, 4, consts4, 0);
                 list_->SetComputeRootDescriptorTable(1, slot(57));
