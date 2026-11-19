@@ -186,7 +186,12 @@ Pull requests and issues are welcome. Please:
 | NVIDIA NGX / DLSS SDK headers | NVIDIA's licence; **downloaded at build time, not in this repo** |
 | OptiScaler, AMD / NVIDIA / Intel runtimes | their own licences; not included |
 
-All trademarks belong to their owners. This project is not affiliated with or endorsed by any of them.
+**This product uses NVIDIA DLSS.** NVIDIA, NVIDIA RTX, DLSS and GeForce are trademarks of NVIDIA Corporation. The DLSS files in the full package are
+NVIDIA's, are distributed unmodified together with this application (never as a stand-alone product) and are covered by the NVIDIA RTX SDKs licence
+(`licenses/NVIDIA-RTX-SDK-LICENSE_DLSS.txt`). NVIDIA Streamline files are MIT licensed (`licenses/NVIDIA-Streamline-LICENSE_MIT.txt`).
+Anyone who redistributes them must keep those licence terms.
+
+All trademarks belong to their owners. This project is not affiliated with or endorsed by any of them, including NVIDIA.
 
 ## Support
 

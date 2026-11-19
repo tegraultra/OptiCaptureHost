@@ -26,7 +26,8 @@ removed or its notice changed, open an issue.
 |---|---|---|
 | `dxgi.dll`, `OptiScaler.ini` | OptiScaler (janblade fork) | GPL-3.0, https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass |
 | `amd_fidelityfx_dx12.dll`, FSR 4 files | AMD FidelityFX upscaler (FSR 3 / FSR 4). `amd_fidelityfx_dx12.dll` is AMD's `amd_fidelityfx_upscaler_dx12.dll` only renamed, contents unchanged | AMD's licence (in the FidelityFX SDK package), official download: https://gpuopen.com/download-fsr-sdk/ |
-| `nvngx_dlss.dll` | NVIDIA DLSS Super Resolution | NVIDIA DLSS SDK licence |
+| `nvngx_dlss.dll` | NVIDIA DLSS Super Resolution | NVIDIA RTX SDKs licence (`licenses/NVIDIA-RTX-SDK-LICENSE_DLSS.txt`, from https://github.com/NVIDIA/DLSS): distributed unmodified, only together with this application, never stand-alone; the licence must stay with the files; no NVIDIA endorsement is claimed |
+| NVIDIA Streamline files | NVIDIA Streamline | MIT (`licenses/NVIDIA-Streamline-LICENSE_MIT.txt`, from https://github.com/NVIDIAGameWorks/Streamline), keep the copyright notice |
 | Intel XeSS files (upscaler and frame generation) | Intel XeSS | Intel Simplified Software License, binary and unmodified, from Intel's official SDK |
 | `dlss-enabler-headless.dll` | DLSS Enabler (headless), by its author | permission page: https://www.nexusmods.com/site/mods/757 (credit the author, do not modify, not for sale); built on dlssg-to-fsr3 (Nukem9), OptiScaler and others |
 
@@ -38,5 +39,7 @@ These files are **not** in the package or the repository. Download them from the
 |---|---|
 | DittoSR (folder `DittoSR`) | https://github.com/Vancete/DittoSR/releases (check the licence there) |
 | `nvngx_dlssnr.dll` (DLSS 5 runtime), optional, version 310.9.16, needed only for DLSS 5 | NVIDIA has no public download for it; get it yourself from a source you trust and check that you may use it. It is not distributed here. |
+
+This product uses NVIDIA DLSS. NVIDIA, NVIDIA RTX, DLSS and GeForce are trademarks of NVIDIA Corporation.
 
 All trademarks belong to their owners. This project is not affiliated with or endorsed by any of them.
