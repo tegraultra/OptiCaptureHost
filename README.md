@@ -5,8 +5,8 @@
 ### Frame generation and modern upscaling for **any** game window — now open source.
 **FSR 4 · XeSS · Multi Frame Generation up to 6x · DLSS / FSR 3-4 output scaling** — without touching the game.
 
-[![Latest release](https://img.shields.io/github/v/release/REPLACE_OWNER/REPLACE_REPO?style=for-the-badge&label=download)](../../releases/latest)
-[![Build](https://img.shields.io/github/actions/workflow/status/REPLACE_OWNER/REPLACE_REPO/build.yml?style=for-the-badge&label=build)](../../actions)
+[![Latest release](https://img.shields.io/github/v/release/tegraultra/OptiCaptureHost?style=for-the-badge&label=download)](../../releases/latest)
+[![Build](https://img.shields.io/github/actions/workflow/status/tegraultra/OptiCaptureHost/build.yml?style=for-the-badge&label=build)](../../actions)
 [![Platform](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078d4?style=for-the-badge)](#requirements)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=for-the-badge)](LICENSE)
 [![Telegram](https://img.shields.io/badge/Telegram-MKJH__APPS-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/MKJH_APPS)
@@ -80,8 +80,8 @@ The project has two programs:
 You need **Windows**, **Visual Studio 2022** (Desktop development with C++) and **CMake 3.20+**.
 
 ```powershell
-git clone https://github.com/REPLACE_OWNER/REPLACE_REPO.git
-cd REPLACE_REPO
+git clone https://github.com/tegraultra/OptiCaptureHost.git
+cd OptiCaptureHost
 cmake -S . -B build -A x64
 cmake --build build --config Release
 # build\Release\OptiCaptureHost.exe, build\Release\OptiCaptureLauncher.exe
