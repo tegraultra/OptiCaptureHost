@@ -12,8 +12,7 @@ code and the components under "In the source" below.
 ## OptiScaler (not included in the small zip)
 
 OptiScaler is not part of this repository. It is used as `dxgi.dll` and has to be downloaded by the user from the
-[OptiScaler-F5-DLSSNR-Multipass](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass) repository (janblade's fork of
-[OptiScaler](https://github.com/optiscaler/OptiScaler)), which is licensed under the **GNU General Public License v3.0**. It is used unmodified by
+[OptiScaler-F5-DLSSNR-Multipass](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass) repository (janblade's fork of OptiScaler), which is licensed under the **GNU General Public License v3.0**. It is used unmodified by
 OptiCaptureHost; only the file name is `dxgi.dll`. Their licence texts, copyright notices and credits are in those repositories
 (and in that fork's `docs/CREDITS.md`) and apply to those files.
 

@@ -22,7 +22,7 @@
 **Run OptiScaler in any game, app or window.** OptiCaptureHost is a window capture plus a Direct3D 12 overlay that unlocks DLSS 5, DLSS, FSR 3/4 and XeSS upscaling,
 all frame generation and Multi Frame Generation (up to 6x), and every other OptiScaler feature, without touching the game.
 
-[OptiScaler](https://github.com/optiscaler/OptiScaler) can add frame generation and better upscaling to games, but only to games it can hook.
+[OptiScaler](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass) can add frame generation and better upscaling to games, but only to games it can hook.
 Many games can't be hooked: old engines, DX11-only titles, launchers with anti-tamper, emulators, video players.
 
 **OptiCaptureHost takes a different road.** It captures the game's window with Windows Graphics Capture and shows it in its own
@@ -91,6 +91,22 @@ with their licence texts in the `licenses` folder. Each keeps its own licence; s
 - **DittoSR**: [github.com/Vancete/DittoSR/releases](https://github.com/Vancete/DittoSR/releases), copy its files into the `DittoSR` folder.
 - **`nvngx_dlssnr.dll`** (DLSS 5 runtime): get it yourself from a source you trust; it is not distributed here.
 
+## Administrator rights and RTSS
+
+The launcher itself runs as a **normal program** (not as administrator), so the shortcuts of the games it starts keep working.
+
+The frame limiter and the on-screen display are set through RivaTuner Statistics Server (RTSS) by writing its profile files. RTSS is usually installed in
+`Program Files`, where Windows only lets an administrator write. So:
+
+- When you press **Apply** (or START) and RTSS does not accept the change, the launcher starts a second copy of itself **as administrator** only for that one
+  step, and Windows shows a **UAC prompt**. Click **Yes**. If you click **No**, the limit is not written and the launcher says so; press Apply again and allow it.
+- The same happens if the **game runs as administrator** and the launcher does not: the launcher asks for permission to change the game window.
+- OptiCaptureHost.exe always gets its own RTSS profile with the limit at **0** (no limit), unless you chose the host as the limiter target.
+- Keep **RTSS running** while you apply. If RTSS is not installed, the launcher tells you and the rest still works.
+- Your RTSS **Global** profile is never changed; the launcher only edits the profile of the game (or of the host) and puts it back when you turn the limiter off.
+- To avoid the prompt every time, you can run the launcher as administrator yourself (right-click, Run as administrator), but then games started from it also
+  run as administrator.
+
 ## Building from source
 
 You need **Windows**, **Visual Studio 2022** (Desktop development with C++) and **CMake 3.20+**.
@@ -152,7 +168,7 @@ Pull requests and issues are welcome. Please:
 | Launcher says the host stopped | Open `OptiCaptureHost.log` next to the exes; the last lines say why. |
 | Output scaling falls back to FSR 1 | The log names the missing file (`nvngx_dlss.dll` / `amd_fidelityfx_dx12.dll`). |
 | Black or frozen picture | The game must be Borderless / Windowed. |
-| No frame limiter | Install RivaTuner Statistics Server. |
+| No frame limiter | Install RivaTuner Statistics Server (RTSS) and keep it running, then read "Administrator rights and RTSS" below. |
 
 ## Third-party
 
