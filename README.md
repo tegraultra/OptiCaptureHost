@@ -19,6 +19,9 @@
 
 ## What is this?
 
+**Run OptiScaler in any game, app or window.** OptiCaptureHost is a window capture plus a Direct3D 12 overlay that unlocks DLSS 5, DLSS, FSR 3/4 and XeSS upscaling,
+all frame generation and Multi Frame Generation (up to 6x), and every other OptiScaler feature, without touching the game.
+
 [OptiScaler](https://github.com/optiscaler/OptiScaler) can add frame generation and better upscaling to games, but only to games it can hook.
 Many games can't be hooked: old engines, DX11-only titles, launchers with anti-tamper, emulators, video players.
 
@@ -69,11 +72,24 @@ The project has two programs:
 ## Quick start (users)
 
 1. Download `OptiCaptureHost-<version>-win64.zip` from the [latest release](../../releases/latest) into a folder of its own.
-2. Add OptiScaler to the same folder: OptiScaler renamed to `dxgi.dll`, its `OptiScaler.ini`, and the files of your frame generation / upscaler.
-3. Optional: `amd_fidelityfx_dx12.dll` (FSR 3/4) and `nvngx_dlss.dll` (DLSS) next to the exes.
+2. **Get OptiScaler.** Download the OptiScaler build from the
+   [OptiScaler-F5-DLSSNR-Multipass](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass) repository (janblade's fork of OptiScaler),
+   **rename it to `dxgi.dll`** and put it, with its `OptiScaler.ini`, in the folder where you installed the program.
+   **To update OptiScaler**, download the new version from the same repository, rename it to `dxgi.dll` again and replace the old file in the install folder.
+3. Add the files of your frame generation / upscaler (see below). Optional: `amd_fidelityfx_dx12.dll` (FSR 3/4) and `nvngx_dlss.dll` (DLSS) next to the exes.
 4. Start the game in Borderless / Windowed mode, run `OptiCaptureLauncher.exe`, click the game, choose a profile, press **START**.
 
-> The runtimes of AMD, NVIDIA, Intel and OptiScaler are theirs and are **not included**. Get them from their official sources.
+> The source repository and the small `OptiCaptureHost-<version>-win64.zip` contain **no** third-party runtimes. They are theirs: get them from the official sources.
+
+### Full package
+
+Next to each release there can also be a **full package** with the third-party files already in it (OptiScaler, FSR 3/4, DLSS, Intel XeSS, DLSS Enabler), unmodified,
+with their licence texts in the `licenses` folder. Each keeps its own licence; see [NOTICE.md](NOTICE.md).
+
+**Download these separately** and put them next to the program (they are not included, for licence reasons):
+
+- **DittoSR**: [github.com/Vancete/DittoSR/releases](https://github.com/Vancete/DittoSR/releases), copy its files into the `DittoSR` folder.
+- **`nvngx_dlssnr.dll`** (DLSS 5 runtime): get it yourself from a source you trust; it is not distributed here.
 
 ## Building from source
 
