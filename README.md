@@ -96,7 +96,7 @@ with their licence texts in the `licenses` folder. Each keeps its own licence; s
 **Download these separately** and put them next to the program (they are not included, for licence reasons):
 
 - **DittoSR**: [github.com/Vancete/DittoSR/releases](https://github.com/Vancete/DittoSR/releases), copy its files into the `DittoSR` folder.
-- **`nvngx_dlssnr.dll`** (DLSS 5 runtime): get it yourself from a source you trust; it is not distributed here.
+- **`nvngx_dlssnr.dll`** (DLSS 5 runtime), **optional**: it is needed only for DLSS 5, and everything else works without it. DLSS 5 needs **version 310.9.16** of this file. It is not distributed here; get it yourself from a source you trust and check that you may use it.
 
 ## Administrator rights and RTSS
 

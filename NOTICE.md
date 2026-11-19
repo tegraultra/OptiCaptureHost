@@ -37,6 +37,6 @@ These files are **not** in the package or the repository. Download them from the
 | File | Where to get it |
 |---|---|
 | DittoSR (folder `DittoSR`) | https://github.com/Vancete/DittoSR/releases (check the licence there) |
-| `nvngx_dlssnr.dll` (DLSS 5 runtime) | NVIDIA has no public download for it; get it yourself from a source you trust and check that you may use it. It is not distributed here. |
+| `nvngx_dlssnr.dll` (DLSS 5 runtime), optional, version 310.9.16, needed only for DLSS 5 | NVIDIA has no public download for it; get it yourself from a source you trust and check that you may use it. It is not distributed here. |
 
 All trademarks belong to their owners. This project is not affiliated with or endorsed by any of them.
