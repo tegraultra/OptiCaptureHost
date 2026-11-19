@@ -7,6 +7,7 @@ code and the components under "In the source" below.
 
 - FSR 1 shader code and the FidelityFX API headers (`third_party/ffx`): AMD, MIT.
 - NVIDIA Image Scaling shader code: NVIDIA, MIT.
+- The GitHub mark on the launcher's "Source code" button is the Octicons `mark-github` shape from GitHub (https://primer.style/foundations/icons, MIT). GitHub and the GitHub logo are trademarks of GitHub, Inc.; the button only links to this project's repository.
 - NVIDIA NGX / DLSS SDK headers: NVIDIA's licence; downloaded at build time and not part of this repository.
 
 ## OptiScaler (not included in the small zip)

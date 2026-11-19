@@ -49,7 +49,7 @@ constexpr const wchar_t* kTelegramUrl = L"https://t.me/MKJH_APPS";
 constexpr const wchar_t* kTelegramJHUrl = L"https://t.me/PersianPatchDeveloper";
 constexpr const wchar_t* kTelegramAppsUrl = L"https://t.me/MKJH_APPS";
 constexpr const wchar_t* kTelegramArchiveUrl = L"https://t.me/MKJH_ARCHIVE";
-constexpr const wchar_t* kDonateUrl = L"https://daramet.com/MK_JH";
+constexpr const wchar_t* kGithubUrl = L"https://github.com/tegraultra/OptiCaptureHost";
 constexpr const wchar_t* kTelegramText = L"t.me/MKJH_APPS";
 constexpr const wchar_t* kHostExe = L"OptiCaptureHost.exe";
 constexpr const wchar_t* kOverlayClass = L"OptiCaptureHostOverlay"; // the host's overlay window class
@@ -70,7 +70,7 @@ constexpr int kIdUpscalerApply = 12;
 constexpr int kIdLinkJH = 8;
 constexpr int kIdLinkApps = 9;
 constexpr int kIdLinkArchive = 10;
-constexpr int kIdLinkDonate = 50;
+constexpr int kIdLinkGithub = 50;
 constexpr int kIdOptiFps = 51; // OptiScaler FPS limit = monitor refresh rate
 constexpr int kIdMfg0 = 60; // 60..64: multi frame generation 2x / 3x / 4x / 5x / 6x
 constexpr int kFgMenuBase = 5000;
@@ -240,17 +240,20 @@ void DrawPlane(gp::Graphics& g, const gp::RectF& r)
     g.DrawLine(&fold, P(0.47f, 0.60f), P(0.80f, 0.24f));
 }
 
-// A small heart in a round badge (the donate link).
-void DrawHeart(gp::Graphics& g, const gp::RectF& r)
+// The GitHub mark (Octicons "mark-github", MIT, (c) GitHub Inc.), drawn as one filled outline in the given colour.
+// The shape is the 16 x 16 path of the official SVG, as 25 cubic Bezier segments.
+void DrawGithubMark(gp::Graphics& g, const gp::RectF& r, const gp::Color& color)
 {
-    GradRound(g, r, r.Width / 2.0f, gp::Color(255, 255, 94, 130), gp::Color(255, 255, 160, 90));
-    auto P = [&](float x, float y) { return gp::PointF(r.X + r.Width * x, r.Y + r.Height * y); };
-    gp::SolidBrush w(col::White());
-    const float rr = r.Width * 0.17f;
-    g.FillEllipse(&w, P(0.31f, 0.30f).X, P(0.31f, 0.30f).Y, rr * 2, rr * 2);
-    g.FillEllipse(&w, P(0.52f, 0.30f).X, P(0.52f, 0.30f).Y, rr * 2, rr * 2);
-    gp::PointF tri[3] = { P(0.285f, 0.50f), P(0.755f, 0.50f), P(0.50f, 0.78f) };
-    g.FillPolygon(&w, tri, 3);
+    static const gp::PointF kPts[] = { { 8f, 0f },{ 3.58f, 0f },{ 0f, 3.58f },{ 0f, 8f },{ 0f, 11.54f },{ 2.29f, 14.53f },{ 5.47f, 15.59f },{ 5.87f, 15.66f },{ 6.02f, 15.42f },{ 6.02f, 15.21f },{ 6.02f, 15.02f },{ 6.01f, 14.39f },{ 6.01f, 13.72f },{ 4f, 14.09f },{ 3.48f, 13.23f },{ 3.32f, 12.78f },{ 3.23f, 12.55f },{ 2.84f, 11.84f },{ 2.5f, 11.65f },{ 2.22f, 11.5f },{ 1.82f, 11.13f },{ 2.49f, 11.12f },{ 3.12f, 11.11f },{ 3.57f, 11.7f },{ 3.72f, 11.94f },{ 4.44f, 13.15f },{ 5.59f, 12.81f },{ 6.05f, 12.6f },{ 6.12f, 12.08f },{ 6.33f, 11.73f },{ 6.56f, 11.53f },{ 4.78f, 11.33f },{ 2.92f, 10.64f },{ 2.92f, 7.58f },{ 2.92f, 6.71f },{ 3.23f, 5.99f },{ 3.74f, 5.43f },{ 3.66f, 5.23f },{ 3.38f, 4.41f },{ 3.82f, 3.31f },{ 3.82f, 3.31f },{ 4.49f, 3.1f },{ 6.02f, 4.13f },{ 6.66f, 3.95f },{ 7.34f, 3.86f },{ 8.02f, 3.86f },{ 8.7f, 3.86f },{ 9.38f, 3.95f },{ 10.02f, 4.13f },{ 11.55f, 3.09f },{ 12.22f, 3.31f },{ 12.22f, 3.31f },{ 12.66f, 4.41f },{ 12.38f, 5.23f },{ 12.3f, 5.43f },{ 12.81f, 5.99f },{ 13.12f, 6.7f },{ 13.12f, 7.58f },{ 13.12f, 10.65f },{ 11.25f, 11.33f },{ 9.47f, 11.53f },{ 9.76f, 11.78f },{ 10.01f, 12.26f },{ 10.01f, 13.01f },{ 10.01f, 14.08f },{ 10f, 14.94f },{ 10f, 15.21f },{ 10f, 15.42f },{ 10.15f, 15.67f },{ 10.55f, 15.59f },{ 13.71f, 14.53f },{ 16f, 11.53f },{ 16f, 8f },{ 16f, 3.58f },{ 12.42f, 0f },{ 8f, 0f } };
+    constexpr int kCount = static_cast<int>(sizeof(kPts) / sizeof(kPts[0]));
+    gp::PointF p[kCount];
+    for (int i = 0; i < kCount; ++i)
+        p[i] = gp::PointF(r.X + kPts[i].X / 16.0f * r.Width, r.Y + kPts[i].Y / 16.0f * r.Height);
+    gp::GraphicsPath path;
+    path.AddBeziers(p, kCount);
+    path.CloseFigure();
+    gp::SolidBrush b(color);
+    g.FillPath(&b, &path);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -2883,9 +2886,9 @@ void App::OnClick(int id)
     {
         ShellExecuteW(hwnd_, L"open", kTelegramAppsUrl, nullptr, nullptr, SW_SHOWNORMAL);
     }
-    else if (id == kIdLinkDonate)
+    else if (id == kIdLinkGithub)
     {
-        ShellExecuteW(hwnd_, L"open", kDonateUrl, nullptr, nullptr, SW_SHOWNORMAL);
+        ShellExecuteW(hwnd_, L"open", kGithubUrl, nullptr, nullptr, SW_SHOWNORMAL);
     }
     else if (id == kIdLinkArchive)
     {
@@ -4353,21 +4356,21 @@ void App::Paint(HDC dc, int W, int H)
                 { L"Developer", L"MK-JH", 32, 128, kIdLinkJH, false },
                 { L"Telegram Channel", L"MK-JH_APPS", 168, 168, kIdLinkApps, false },
                 { L"Archive", L"MK-JH_ARCHIVE", 344, 168, kIdLinkArchive, false },
-                { L"Support me", L"Donate", 520, 122, kIdLinkDonate, true },
+                { L"Source code", L"GitHub", 520, 122, kIdLinkGithub, true },
             };
             for (const LinkChip& c : chips)
             {
                 const gp::RectF chip = R(c.x, 860, c.w, 34);
                 const bool hot = hover_ == c.id;
-                const gp::Color tone = c.heart ? gp::Color(255, 255, 110, 140) : col::Accent();
+                const gp::Color tone = col::Accent();
                 FillRound(g, chip, S(9), hot ? col::Alpha(tone, 46) : col::Row());
                 StrokeRound(g, chip, S(9), hot ? tone : col::Line(), max(1.0f, S(1)));
                 if (c.heart)
-                    DrawHeart(g, R(c.x + 8, 866, 22, 22));
+                    DrawGithubMark(g, R(c.x + 8, 866, 22, 22), hot ? col::Accent2() : col::Text());
                 else
                     DrawPlane(g, R(c.x + 8, 866, 22, 22));
                 Text(g, c.label, *f_.tiny, R(c.x + 36, 862, c.w - 40, 14), col::Muted());
-                Text(g, c.value, hot ? *f_.link : *f_.linkN, R(c.x + 36, 874, c.w - 40, 18), hot ? (c.heart ? tone : col::Accent2()) : tone);
+                Text(g, c.value, hot ? *f_.link : *f_.linkN, R(c.x + 36, 874, c.w - 40, 18), hot ? col::Accent2() : tone);
                 AddHit(chip, c.id);
             }
         }
