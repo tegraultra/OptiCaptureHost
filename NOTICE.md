@@ -25,7 +25,7 @@ removed or its notice changed, open an issue.
 | File | What it is | Licence / source |
 |---|---|---|
 | `dxgi.dll`, `OptiScaler.ini` | OptiScaler (janblade fork) | GPL-3.0, https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass |
-| `amd_fidelityfx_dx12.dll`, FSR 4 files | AMD FidelityFX / FSR 3 and FSR 4 | AMD's licence, official download: https://gpuopen.com/fsr |
+| `amd_fidelityfx_dx12.dll`, FSR 4 files | AMD FidelityFX upscaler (FSR 3 / FSR 4). `amd_fidelityfx_dx12.dll` is AMD's `amd_fidelityfx_upscaler_dx12.dll` only renamed, contents unchanged | AMD's licence (in the FidelityFX SDK package), official download: https://gpuopen.com/download-fsr-sdk/ |
 | `nvngx_dlss.dll` | NVIDIA DLSS Super Resolution | NVIDIA DLSS SDK licence |
 | Intel XeSS files (upscaler and frame generation) | Intel XeSS | Intel Simplified Software License, binary and unmodified, from Intel's official SDK |
 | `dlss-enabler-headless.dll` | DLSS Enabler (headless), by its author | permission page: https://www.nexusmods.com/site/mods/757 (credit the author, do not modify, not for sale); built on dlssg-to-fsr3 (Nukem9), OptiScaler and others |

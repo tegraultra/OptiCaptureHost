@@ -41,6 +41,13 @@ The project has two programs:
 | `OptiCaptureLauncher.exe` | The control panel: pick a game, profiles, frame generation, limiter, output scaling, writes `OptiScaler.ini`. |
 | `OptiCaptureHost.exe` | The capture + overlay + upscaling worker the launcher starts. |
 
+
+<div align="center">
+
+![OptiCaptureHost launcher](docs/launcher.png)
+
+</div>
+
 ## Highlights
 
 - **Works on almost anything that runs in a window** — DX9, DX11, DX12, Vulkan, OpenGL, emulators.
@@ -51,7 +58,7 @@ The project has two programs:
   | Method | What it is |
   |---|---|
   | **DLSS** | NVIDIA DLSS Super Resolution (RTX, needs `nvngx_dlss.dll`) |
-  | **FSR 3 / 4** | AMD FidelityFX upscaler (any GPU, needs `amd_fidelityfx_dx12.dll`) |
+  | **FSR 3 / 4** | AMD FidelityFX upscaler (any GPU, needs `amd_fidelityfx_dx12.dll`, which is AMD's `amd_fidelityfx_upscaler_dx12.dll` renamed) |
   | FSR 1 | EASU + RCAS, no extra files |
   | NIS | NVIDIA Image Scaling, no extra files |
   | Bilinear | Plain scaling |
@@ -76,7 +83,7 @@ The project has two programs:
    [OptiScaler-F5-DLSSNR-Multipass](https://github.com/janblade/OptiScaler-F5-DLSSNR-Multipass) repository (janblade's fork of OptiScaler),
    **rename it to `dxgi.dll`** and put it, with its `OptiScaler.ini`, in the folder where you installed the program.
    **To update OptiScaler**, download the new version from the same repository, rename it to `dxgi.dll` again and replace the old file in the install folder.
-3. Add the files of your frame generation / upscaler (see below). Optional: `amd_fidelityfx_dx12.dll` (FSR 3/4) and `nvngx_dlss.dll` (DLSS) next to the exes.
+3. Add the files of your frame generation / upscaler (see below). Optional: `amd_fidelityfx_dx12.dll` (FSR 3/4) and `nvngx_dlss.dll` (DLSS) next to the exes. `amd_fidelityfx_dx12.dll` is AMD's official `amd_fidelityfx_upscaler_dx12.dll` (FidelityFX SDK, [download](https://gpuopen.com/download-fsr-sdk/)) **renamed** to `amd_fidelityfx_dx12.dll`; the file itself is not changed.
 4. Start the game in Borderless / Windowed mode, run `OptiCaptureLauncher.exe`, click the game, choose a profile, press **START**.
 
 > The source repository and the small `OptiCaptureHost-<version>-win64.zip` contain **no** third-party runtimes. They are theirs: get them from the official sources.
