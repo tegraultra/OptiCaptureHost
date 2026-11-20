@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# one build at a time, so two builds never pick the same version
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   windows:
     runs-on: windows-latest
@@ -49,6 +54,35 @@ jobs:
             exit 1
           }
 
+      # On main every build gets a NEW version: the patch number is raised past the highest release that already exists
+      # (v2.10.70 -> v2.10.71 ...), written into src/version.h of this build only, so the exe, the launcher and the release all show it.
+      # Older releases are never touched.
+      - name: Pick the next version
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $repo = '${{ github.repository }}'
+          $h = Get-Content src/version.h -Raw
+          $major = [int][regex]::Match($h, '#define OC_VER_MAJOR (\d+)').Groups[1].Value
+          $minor = [int][regex]::Match($h, '#define OC_VER_MINOR (\d+)').Groups[1].Value
+          $patch = [int][regex]::Match($h, '#define OC_VER_PATCH (\d+)').Groups[1].Value
+          $tags = @()
+          try { $tags = (gh api --paginate "repos/$repo/releases?per_page=100" | ConvertFrom-Json) | ForEach-Object { $_.tag_name } } catch { Write-Host "::warning::could not list releases: $_" }
+          $max = -1
+          foreach ($t in $tags) {
+            $m = [regex]::Match($t, "^v$major\.$minor\.(\d+)$")
+            if ($m.Success -and [int]$m.Groups[1].Value -gt $max) { $max = [int]$m.Groups[1].Value }
+          }
+          if ($patch -le $max) { $patch = $max + 1 }
+          $ver = "$major.$minor.$patch"
+          Write-Host "Version of this build: $ver (highest existing release patch: $max)"
+          $h = [regex]::Replace($h, '#define OC_VER_PATCH \d+', "#define OC_VER_PATCH $patch")
+          $h = [regex]::Replace($h, '#define OC_VER_STR "[^"]+"', "#define OC_VER_STR `"$ver`"")
+          Set-Content src/version.h $h -NoNewline
+          "OC_BUILD_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Configure
         run: cmake -S . -B build -A x64
 
@@ -69,25 +103,16 @@ jobs:
           name: OptiCaptureHost
           path: dist
 
-      # One release per version (tag v2.10.63, ...): every new version is ADDED and the older releases stay.
-      # Building the same version again only replaces that version's own release.
+      # Every build on main makes a NEW release (tag v<version>); older releases are never deleted or replaced.
       - name: Publish release
         if: github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $ErrorActionPreference = 'Continue'
-          $repo = '${{ github.repository }}'
-          $ver = (Select-String -Path src/version.h -Pattern '#define OC_VER_STR "([^"]+)"').Matches[0].Groups[1].Value
+          $ver = $env:OC_BUILD_VERSION
+          if (-not $ver) { Write-Host "::error::no version was picked"; exit 1 }
           $tag = "v$ver"
           Copy-Item OptiCaptureHost-win64.zip "OptiCaptureHost-$ver-win64.zip"
-
-          # only this version's own release (if the same version was built before) is replaced
-          $rels = (gh api "repos/$repo/releases?per_page=100" | ConvertFrom-Json) | Where-Object { $_.tag_name -eq $tag }
-          foreach ($r in $rels) { gh api -X DELETE "repos/$repo/releases/$($r.id)" | Out-Null }
-          gh api -X DELETE "repos/$repo/git/refs/tags/$tag" 2>$null | Out-Null
-          $global:LASTEXITCODE = 0
-
           gh release create $tag "OptiCaptureHost-$ver-win64.zip" --title "OptiCaptureHost $ver" --notes "Automatic build of commit ${{ github.sha }}." --target ${{ github.sha }} --latest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

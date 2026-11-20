@@ -85,6 +85,13 @@ The project has two programs:
    **To update OptiScaler**, download the new version from the same repository, rename it to `dxgi.dll` again and replace the old file in the install folder.
 3. Add the files of your frame generation / upscaler (see below). Optional: `amd_fidelityfx_dx12.dll` (FSR 3/4) and `nvngx_dlss.dll` (DLSS) next to the exes. `amd_fidelityfx_dx12.dll` is AMD's official `amd_fidelityfx_upscaler_dx12.dll` (FidelityFX SDK, [download](https://gpuopen.com/download-fsr-sdk/)) **renamed** to `amd_fidelityfx_dx12.dll`; the file itself is not changed.
 4. Start the game in Borderless / Windowed mode, run `OptiCaptureLauncher.exe`, click the game, choose a profile, press **START**.
+5. **Connect OptiScaler to the host.** After START, do one of these:
+   - Open the OptiScaler menu (the key is shown in the launcher's status line) and, in the **Optical F5Low** section, enable **NR + Frame Generation**; or
+   - in the launcher, under **Output scaling**, choose **FSR 3/4** or **DLSS**.
+
+   Either way OptiScaler attaches to the host, and its upscaling and frame generation start working.
+
+> **Full package:** everything above is already prepared in it, so you can use it right away.
 
 > The source repository and the small `OptiCaptureHost-<version>-win64.zip` contain **no** third-party runtimes. They are theirs: get them from the official sources.
 
