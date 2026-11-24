@@ -75,6 +75,10 @@ constexpr int kIdD5Enable = 70;   // DLSS 5 side window: enable / disable
 constexpr int kIdHudFix = 73;     // tick box: [OptiFG] HUDFix
 constexpr int kIdAsyncFg = 74;    // tick box: [FSRFG] AllowAsync
 constexpr int kIdD5Toggle = 75;   // header button: opens / closes the DLSS 5 window
+constexpr int kIdDepthToggle = 76;  // header button: opens / closes the Depth window
+constexpr int kIdDepthFlat = 77;    // Depth window: flat depth (as always)
+constexpr int kIdDepthReshade = 78; // Depth window: the game's depth through the ReShade add-on
+constexpr int kIdDepthFolder = 79;  // Depth window: open the folder with the add-on files
 constexpr int kIdD5Download = 72; // DLSS 5 side window: download link for nvngx_dlssnr.dll
 constexpr const wchar_t* kPanelClass = L"OptiCaptureLauncherDlss5";
 constexpr const wchar_t* kDlssnrFile = L"nvngx_dlssnr.dll";
@@ -1432,6 +1436,8 @@ class App
     LRESULT OnPanelMessage(UINT m, WPARAM w, LPARAM l);
     bool CreatePanel();
     bool lastHave_ = false; // the dll was found at the last look (decides the height of the DLSS 5 window)
+    int panelKind_ = 0;     // what the side window shows: 0 DLSS 5, 1 Depth
+    void DrawDepthPanel(gp::Graphics& g);
     bool panelOpen_ = false; // the DLSS 5 window is shown (header button "DLSS 5")
     void DockPanel();
     void PaintPanel(HDC dc, int w, int h);
@@ -3133,14 +3139,24 @@ void App::OnClick(int id)
             }
         }
     }
-    else if (id == kIdD5Toggle)
+    else if (id == kIdD5Toggle || id == kIdDepthToggle)
     {
-        panelOpen_ = !panelOpen_;
+        const int kind = id == kIdDepthToggle ? 1 : 0;
+        if (panelOpen_ && panelKind_ == kind)
+        {
+            panelOpen_ = false; // the same button again: close
+        }
+        else
+        {
+            panelKind_ = kind;
+            panelOpen_ = true;
+        }
         if (panel_)
         {
             if (panelOpen_)
             {
                 ReadFgState();
+                lastHave_ = DlssnrPresent();
                 DockPanel();
                 ShowWindow(panel_, SW_SHOWNOACTIVATE);
                 InvalidatePanel();
@@ -3151,6 +3167,24 @@ void App::OnClick(int id)
             }
         }
         Invalidate();
+    }
+    else if (id == kIdDepthFlat || id == kIdDepthReshade)
+    {
+        st_.depthSource = id == kIdDepthReshade ? 1 : 0;
+        Save();
+        SetNote(st_.depthSource == 1
+                    ? L"Depth: ReShade. Needs the add-on in the game (see the Depth window). Used by Output scaling FSR 3/4 and DLSS."
+                    : L"Depth: Flat, as always.", Note::Ok);
+        InvalidatePanel();
+    }
+    else if (id == kIdDepthFolder)
+    {
+        const std::wstring dir = oc::ExeDir() + L"ReShade depth";
+        const DWORD at = GetFileAttributesW(dir.c_str());
+        if (at != INVALID_FILE_ATTRIBUTES && (at & FILE_ATTRIBUTE_DIRECTORY))
+            ShellExecuteW(hwnd_, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        else
+            SetNote(L"The folder \"ReShade depth\" was not found next to the launcher (it is in the full package).", Note::Error);
     }
     else if (id == kIdD5Enable)
     {
@@ -3545,6 +3579,7 @@ namespace
 {
 constexpr float kPanelW = 270.0f; // logical units, like the main window (see S / R)
 constexpr float kPanelHHave = 446.0f;    // dll found: shorter
+constexpr float kPanelHDepth = 730.0f;   // the Depth window
 constexpr float kPanelHMissing = 556.0f; // dll missing: warning, download button and a hint more
 constexpr float kPanelDrop = 90.0f; // how far below the top of the main window the DLSS 5 window starts
 } // namespace
@@ -3595,8 +3630,9 @@ void App::DockPanel()
     RECT r{};
     GetWindowRect(hwnd_, &r);
     const int pw = static_cast<int>(S(kPanelW));
-    lastHave_ = DlssnrPresent();
-    const int ph = static_cast<int>(S(lastHave_ ? kPanelHHave : kPanelHMissing));
+    if (panelKind_ == 0)
+        lastHave_ = DlssnrPresent();
+    const int ph = static_cast<int>(S(panelKind_ == 1 ? kPanelHDepth : (lastHave_ ? kPanelHHave : kPanelHMissing)));
 
     MONITORINFO mi{};
     mi.cbSize = sizeof(mi);
@@ -3617,6 +3653,118 @@ int App::HitAt2(int x, int y) const
             return it->id;
     }
     return kIdNone;
+}
+
+void App::DrawDepthPanel(gp::Graphics& g)
+{
+    Text(g, L"Depth", *f_.title, R(18, 14, 234, 34), col::Text());
+    Text(g, L"For the host's own output scaling (FSR 3 / 4, DLSS).", *f_.sm, R(18, 50, 234, 36), col::Muted(), 0, true);
+    auto sepAt = [&](float yy)
+    {
+        gp::Pen sep(col::Alpha(col::Line(), 150), max(1.0f, S(1)));
+        g.DrawLine(&sep, S(18), S(yy), S(252), S(yy));
+    };
+    sepAt(92);
+
+    auto radio = [&](float y, const wchar_t* title, const wchar_t* desc, bool on, int id)
+    {
+        const gp::RectF ring = R(18, y + 4, 20, 20);
+        const bool hot = hover_ == id;
+        FillRound(g, ring, S(10), col::Row());
+        StrokeRound(g, ring, S(10), on ? col::Accent() : (hot ? col::Accent2() : col::Line()), max(1.0f, S(on ? 2.0f : 1.0f)));
+        if (on)
+        {
+            gp::SolidBrush dot(col::Accent());
+            g.FillEllipse(&dot, ring.X + S(5), ring.Y + S(5), S(10), S(10));
+        }
+        Text(g, title, *f_.bodyB, R(48, y, 204, 24), col::Text());
+        Text(g, desc, *f_.sm, R(48, y + 26, 204, 36), col::Muted(), 0, true);
+        AddHit(R(18, y - 4, 234, 68), id);
+    };
+    radio(104, L"Flat  (default)", L"As always: nothing changes. Works in every game.", st_.depthSource == 0, kIdDepthFlat);
+    radio(178, L"ReShade", L"The game's real depth buffer, found by ReShade and shared by an add-on.", st_.depthSource == 1, kIdDepthReshade);
+    sepAt(250);
+
+    // what the host sees
+    std::wstring head, detail;
+    gp::Color tone = col::Muted();
+    if (st_.depthSource == 0)
+    {
+        head = L"Not used";
+        detail = L"The flat depth is used, as before.";
+    }
+    else if (!Running() || !liveValid_)
+    {
+        head = L"Waiting for START";
+        detail = L"Choose Output scaling FSR 3/4 or DLSS, then START.";
+        tone = col::Amber();
+    }
+    else
+    {
+        const std::wstring size = std::to_wstring(live_.depthW) + L"\u00D7" + std::to_wstring(live_.depthH);
+        switch (live_.depthState)
+        {
+        case 2:
+            head = L"\u2713  Receiving " + size;
+            detail = L"The game's depth is in use.";
+            tone = col::Green();
+            break;
+        case 3:
+            head = L"\u2717  Different size";
+            detail = L"Depth " + size + L" is not the size of the captured picture.";
+            tone = col::Red();
+            break;
+        case 4:
+            head = L"\u2717  Cannot open it";
+            detail = L"Start the game and the host with the same rights.";
+            tone = col::Red();
+            break;
+        case 5:
+            head = L"No new pictures";
+            detail = L"Tick OptiCaptureDepth on in ReShade's menu.";
+            tone = col::Amber();
+            break;
+        case 1:
+            head = L"Waiting for the add-on";
+            detail = L"Is ReShade with OptiCaptureDepth.addon64 running in the game?";
+            tone = col::Amber();
+            break;
+        default:
+            head = L"Waiting";
+            detail = L"Output scaling must be FSR 3/4 or DLSS (not Off or NIS).";
+            tone = col::Amber();
+            break;
+        }
+    }
+    {
+        const gp::RectF box = R(18, 262, 234, 70);
+        FillRound(g, box, S(10), col::Row());
+        StrokeRound(g, box, S(10), col::Alpha(tone, 150), max(1.0f, S(1)));
+        Text(g, head, *f_.bodyB, R(30, 268, 216, 22), tone);
+        Text(g, detail, *f_.sm, R(30, 292, 216, 38), col::Muted(), 0, true);
+    }
+
+    Text(g, L"How to use", *f_.bodyB, R(18, 346, 234, 22), col::Text());
+    {
+        const gp::RectF box = R(18, 372, 234, 296);
+        FillRound(g, box, S(10), col::Alpha(col::Accent(), 24));
+        StrokeRound(g, box, S(10), col::Alpha(col::Accent(), 90), max(1.0f, S(1)));
+        Text(g,
+             L"1. Install the latest ReShade (with add-on support) into the game.\n"
+             L"2. Put OptiCaptureDepth.addon64 next to the game's exe, and OptiCaptureDepth.fx into ReShade's Shaders folder.\n"
+             L"3. In ReShade's menu tick OptiCaptureDepth on.\n"
+             L"4. Choose ReShade here, pick Output scaling FSR 3/4 or DLSS, then START.\n"
+             L"Direct3D 11 / 12 games, single-player only: ReShade can get you banned in online games.",
+             *f_.sm, R(28, 380, 216, 282), col::Text(), 0, true);
+    }
+    {
+        const gp::RectF btn = R(18, 680, 234, 32);
+        const bool hot = hover_ == kIdDepthFolder;
+        FillRound(g, btn, S(9), hot ? col::RowHot() : col::Row());
+        StrokeRound(g, btn, S(9), hot ? col::Accent2() : col::Line(), max(1.0f, S(1)));
+        Text(g, L"Open the helper files folder", *f_.chip, btn, col::Text(), 1);
+        AddHit(btn, kIdDepthFolder);
+    }
 }
 
 void App::PaintPanel(HDC dc, int W, int H)
@@ -3643,6 +3791,15 @@ void App::PaintPanel(HDC dc, int W, int H)
     }
 
     // header
+    if (panelKind_ == 1)
+    {
+        DrawDepthPanel(g);
+        hits2_.swap(hits_);
+        hits_.swap(savedHits);
+        hover_ = savedHover;
+        return;
+    }
+
     Text(g, L"DLSS 5", *f_.title, R(18, 14, 234, 34), col::Text());
     Text(g, L"Optional  \u00b7  needs nvngx_dlssnr.dll", *f_.sm, R(18, 50, 240, 18), col::Muted());
     auto sepAt = [&](float yy)
@@ -3731,7 +3888,7 @@ LRESULT App::OnPanelMessage(UINT m, WPARAM w, LPARAM l)
         // look at OptiScaler.ini and at the dll again (they may have been changed by hand)
         if (ReadFgState())
             Invalidate();
-        if (DlssnrPresent() != lastHave_)
+        if (panelKind_ == 0 && DlssnrPresent() != lastHave_)
             DockPanel(); // the window gets shorter / taller
         InvalidatePanel();
         return 0;
@@ -4152,23 +4309,35 @@ void App::Paint(HDC dc, int W, int H)
 
     {
         // "DLSS 5" button: opens / closes the small window docked to the right side of this one
+        const bool open5 = panelOpen_ && panelKind_ == 0;
         const gp::RectF b = R(792, 30, 120, 30);
         const bool hot = hover_ == kIdD5Toggle;
-        FillRound(g, b, S(15), panelOpen_ ? col::Alpha(col::Accent(), 90) : (hot ? col::RowHot() : col::Row()));
-        StrokeRound(g, b, S(15), panelOpen_ ? col::Accent() : (hot ? col::Accent2() : col::Line()), max(1.0f, S(panelOpen_ ? 2 : 1)));
-        Text(g, panelOpen_ ? L"DLSS 5  \u2039" : L"DLSS 5  \u203A", *f_.bodyB, b, col::Text(), 1);
+        FillRound(g, b, S(15), open5 ? col::Alpha(col::Accent(), 90) : (hot ? col::RowHot() : col::Row()));
+        StrokeRound(g, b, S(15), open5 ? col::Accent() : (hot ? col::Accent2() : col::Line()), max(1.0f, S(open5 ? 2 : 1)));
+        Text(g, open5 ? L"DLSS 5  \u2039" : L"DLSS 5  \u203A", *f_.bodyB, b, col::Text(), 1);
         AddHit(b, kIdD5Toggle);
     }
 
     {
-        const gp::RectF pill = R(634, 30, 150, 30);
+        // "Depth" button: opens / closes the window with the depth source (flat / ReShade)
+        const bool openD = panelOpen_ && panelKind_ == 1;
+        const gp::RectF b = R(684, 30, 100, 30);
+        const bool hot = hover_ == kIdDepthToggle;
+        FillRound(g, b, S(15), openD ? col::Alpha(col::Accent(), 90) : (hot ? col::RowHot() : col::Row()));
+        StrokeRound(g, b, S(15), openD ? col::Accent() : (hot ? col::Accent2() : col::Line()), max(1.0f, S(openD ? 2 : 1)));
+        Text(g, openD ? L"Depth  \u2039" : L"Depth  \u203A", *f_.bodyB, b, col::Text(), 1);
+        AddHit(b, kIdDepthToggle);
+    }
+
+    {
+        const gp::RectF pill = R(560, 30, 116, 30);
         const gp::Color tone = stopping_ ? col::Amber() : (running ? col::Green() : col::Muted());
         FillRound(g, pill, S(15), col::Alpha(tone, 36));
         StrokeRound(g, pill, S(15), col::Alpha(tone, 120), max(1.0f, S(1)));
         gp::SolidBrush dot(tone);
         g.FillEllipse(&dot, pill.X + S(14), pill.Y + S(10), S(10), S(10));
         Text(g, stopping_ ? L"Stopping" : (running ? L"Capturing" : L"Ready"), *f_.bodyB,
-             gp::RectF(pill.X + S(32), pill.Y, S(110), pill.Height), tone);
+             gp::RectF(pill.X + S(32), pill.Y, S(82), pill.Height), tone);
     }
 
     // ---- quick modes ----

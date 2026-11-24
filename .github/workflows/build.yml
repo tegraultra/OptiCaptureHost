@@ -49,11 +49,32 @@ jobs:
             exit 1
           }
 
+      # ReShade's public add-on headers (BSD-3-Clause), pinned to one commit. Only used for the optional depth add-on; if this fails
+      # the add-on is simply not built and everything else is unaffected.
+      - name: Fetch ReShade add-on headers
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $c = 'dcf9d0d3df92daa52b31619b3f660f2f04a5d1e6'
+          git init reshade_src
+          git -C reshade_src remote add origin https://github.com/crosire/reshade.git
+          git -C reshade_src fetch --depth 1 origin $c
+          git -C reshade_src checkout FETCH_HEAD
+          New-Item -ItemType Directory -Force third_party/reshade/include | Out-Null
+          Copy-Item reshade_src/include/*.hpp third_party/reshade/include/
+          Copy-Item reshade_src/LICENSE.md third_party/reshade/LICENSE.md
+          Get-ChildItem third_party/reshade -Recurse -File | ForEach-Object { Write-Host $_.FullName }
+
       - name: Configure
         run: cmake -S . -B build -A x64
 
       - name: Build
         run: cmake --build build --config Release
+
+      # The ReShade depth add-on is built on its own and may fail without stopping the build (then it is just missing from the package).
+      - name: Build ReShade depth add-on
+        continue-on-error: true
+        run: cmake --build build --config Release --target OptiCaptureDepthAddon
 
       - name: Package
         shell: pwsh
@@ -62,6 +83,14 @@ jobs:
           Copy-Item build/Release/OptiCaptureHost.exe dist/
           Copy-Item build/Release/OptiCaptureLauncher.exe dist/
           Copy-Item README.md dist/
+          # optional ReShade depth helper (only when it was built)
+          if (Test-Path build/Release/OptiCaptureDepth.addon64) {
+            New-Item -ItemType Directory -Force "dist/ReShade depth" | Out-Null
+            Copy-Item build/Release/OptiCaptureDepth.addon64 "dist/ReShade depth/"
+            Copy-Item reshade/OptiCaptureDepth.fx "dist/ReShade depth/"
+            Copy-Item reshade/README.txt "dist/ReShade depth/"
+            if (Test-Path third_party/reshade/LICENSE.md) { Copy-Item third_party/reshade/LICENSE.md "dist/ReShade depth/ReShade-LICENSE.txt" }
+          } else { Write-Host "::warning::the ReShade depth add-on was not built; the package has no 'ReShade depth' folder" }
           Compress-Archive -Path dist/* -DestinationPath OptiCaptureHost-win64.zip -Force
 
       # No release is made automatically. The build is attached to the run: Actions tab -> the run -> Artifacts (OptiCaptureHost).

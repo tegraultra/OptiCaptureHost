@@ -30,3 +30,14 @@ add_executable(OptiCaptureLauncher WIN32 src/launcher.cpp src/launcher.rc)
 target_compile_definitions(OptiCaptureLauncher PRIVATE UNICODE _UNICODE NOMINMAX)
 target_compile_options(OptiCaptureLauncher PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(OptiCaptureLauncher PRIVATE gdiplus user32 gdi32 shell32 dwmapi)
+
+# Optional: the ReShade depth add-on (OptiCaptureDepth.addon64). It is NOT part of the normal build (EXCLUDE_FROM_ALL): the workflow builds it
+# on its own, so a problem with it can never stop the host or the launcher from building. Needs ReShade's public headers
+# (third_party/reshade/include, fetched by the workflow; BSD-3-Clause).
+if(EXISTS ${CMAKE_SOURCE_DIR}/third_party/reshade/include/reshade.hpp)
+    add_library(OptiCaptureDepthAddon SHARED EXCLUDE_FROM_ALL src/reshade_addon/oc_depth_addon.cpp)
+    set_target_properties(OptiCaptureDepthAddon PROPERTIES OUTPUT_NAME "OptiCaptureDepth" SUFFIX ".addon64")
+    target_compile_definitions(OptiCaptureDepthAddon PRIVATE UNICODE _UNICODE NOMINMAX)
+    target_compile_options(OptiCaptureDepthAddon PRIVATE /W3 /permissive- /EHsc /utf-8)
+    target_include_directories(OptiCaptureDepthAddon PRIVATE third_party/reshade/include)
+endif()

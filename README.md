@@ -65,6 +65,7 @@ The project has two programs:
 
   Levels: **Native (1x)**, **Quality (1.5x)**, **Balanced (1.7x)**, **Performance (2x)**.
 - **The host measures motion itself.** A window capture has no motion vectors, so the host estimates them from consecutive frames on the GPU (block matching, sub-pixel refinement, temporal steadiness, a reactive mask).
+- **Depth source (optional, experimental)** — by default the host's own FSR 3 / 4 and DLSS use a flat depth, so nothing is injected into the game. The *Depth* button in the launcher can switch to **ReShade**: a small ReShade add-on (`ReShade depth` folder in the full package) shares the game's real depth buffer with the host. Direct3D 11 / 12, single-player games only. See `ReShade depth/README.txt`.
 - **Opti Upscaler selector** — FSR 3.1.6, FSR 4.1.2, DLSS 3.7, DittoSR, XeSS, DLSS; picking one writes `OptiScaler.ini` and copies that upscaler's folder next to the exes.
 - Built-in frame limiter, low-latency present modes, VSync on/off/auto, configurable hotkeys, live status panel.
 
@@ -156,6 +157,9 @@ src/
   upscale_shader.h       FSR 1 (EASU/RCAS) shaders        (AMD, MIT)
   nis_shader.h/_config.h NVIDIA Image Scaling             (NVIDIA, MIT)
   fsr_flow_shader.h      motion vectors (block search + per-pixel pass)
+  depth_share.h          what the ReShade depth add-on and the host exchange
+  reshade_addon/         optional ReShade add-on (OptiCaptureDepth.addon64), built on its own
+reshade/                 OptiCaptureDepth.fx (ReShade effect) and the add-on's README
 third_party/ffx/         AMD FidelityFX API headers       (MIT)
 ```
 
@@ -177,7 +181,7 @@ Pull requests and issues are welcome. Please:
 
 - **Latency:** the capture adds one hop; VSync off at START gives the lowest latency.
 - **Mouse:** with output scaling on, the pointer is not remapped.
-- **Temporal upscalers on a capture:** there is no game jitter and no true depth, so DLSS / FSR 3 work from measured motion and look a bit softer than in-game. FSR 4 copes best. This part is experimental.
+- **Temporal upscalers on a capture:** there is no game jitter and, by default, no true depth (the optional ReShade depth source below changes that), so DLSS / FSR 3 work from measured motion and look a bit softer than in-game. FSR 4 copes best. This part is experimental.
 - **Online games:** capturing and resizing a window can still upset some anti-cheat systems. Use at your own risk.
 
 ## Troubleshooting

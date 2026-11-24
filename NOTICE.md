@@ -9,6 +9,7 @@ code and the components under "In the source" below.
 - NVIDIA Image Scaling shader code: NVIDIA, MIT.
 - The GitHub mark on the launcher's "Source code" button is the Octicons `mark-github` shape from GitHub (https://primer.style/foundations/icons, MIT). GitHub and the GitHub logo are trademarks of GitHub, Inc.; the button only links to this project's repository.
 - NVIDIA NGX / DLSS SDK headers: NVIDIA's licence; downloaded at build time and not part of this repository.
+- ReShade add-on headers (https://github.com/crosire/reshade, BSD-3-Clause, Copyright (C) Patrick Mours): downloaded at build time and used to build the optional `OptiCaptureDepth.addon64`; the licence text is shipped next to the add-on (`ReShade depth/ReShade-LICENSE.txt`). ReShade itself is not included: the user installs it. ReShade is a separate project and is not affiliated with this one.
 
 ## OptiScaler (not included in the small zip)
 

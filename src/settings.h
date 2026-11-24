@@ -47,6 +47,7 @@ struct Settings
     int limitMode = 1;        // RTSS limiter mode: 0 async, 1 front edge sync, 2 back edge sync
     int profileAuto = 0;      // apply a saved game profile automatically when its game is picked
     int hideOsd = 1;          // turn the RTSS on-screen display of the game off while the host runs
+    int depthSource = 0;      // depth for the host's own output scaling: 0 flat (as always), 1 the game's real depth through the ReShade add-on
     int optiFps = 1;          // write OptiScaler.ini [Framerate] FramerateLimit = the monitor's refresh rate at every START
     int limitAuto = 0;        // apply the RTSS limiter every time START is pressed
     int limitFps = 0;         // 0 refresh rate, -2 half refresh rate, else fixed fps
@@ -133,6 +134,7 @@ inline void LoadSettings(Settings& s)
     s.profileAuto = GetPrivateProfileIntW(L"Profiles", L"Auto", 0, path.c_str()) != 0 ? 1 : 0;
     s.hideOsd = GetPrivateProfileIntW(L"Limiter", L"HideOsd", 1, path.c_str()) != 0 ? 1 : 0;
     s.optiFps = GetPrivateProfileIntW(L"Limiter", L"OptiFps", 1, path.c_str()) != 0 ? 1 : 0;
+    s.depthSource = GetPrivateProfileIntW(L"Depth", L"Source", 0, path.c_str()) == 1 ? 1 : 0;
     s.limitAuto = GetPrivateProfileIntW(L"Limiter", L"Auto", 0, path.c_str()) != 0 ? 1 : 0;
     s.limitMode = GetPrivateProfileIntW(L"Limiter", L"Mode", 1, path.c_str());
     if (s.limitMode < 0 || s.limitMode > 2) s.limitMode = 1;
@@ -186,6 +188,7 @@ inline void SaveSettings(const Settings& s)
     WritePrivateProfileStringW(L"Profiles", L"Auto", std::to_wstring(s.profileAuto).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"HideOsd", std::to_wstring(s.hideOsd).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"OptiFps", std::to_wstring(s.optiFps).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"Depth", L"Source", std::to_wstring(s.depthSource).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"Auto", std::to_wstring(s.limitAuto).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"Mode", std::to_wstring(s.limitMode).c_str(), path.c_str());
     WritePrivateProfileStringW(L"Limiter", L"Fps", std::to_wstring(s.limitFps).c_str(), path.c_str());
@@ -218,6 +221,8 @@ struct LiveStats
     int focus = 2;           // 0 game, 1 overlay, 2 other
     int capHint = 0;         // 1: the game's frame rate is very steady and clearly below the refresh rate
     double capFps = 0.0;     // that frame rate
+    int depthState = 0;      // depth source "ReShade": 0 not used, 1 waiting for the add-on, 2 receiving, 3 other size, 4 cannot open, 5 no new pictures
+    unsigned depthW = 0, depthH = 0; // size of the shared depth
 };
 
 inline std::wstring StatusPath()
@@ -234,9 +239,9 @@ inline void WriteLiveStats(const LiveStats& s)
         return;
     std::fprintf(f,
                  "stamp=%llu\npid=%u\nrefresh=%.3f\ncapture=%.3f\npresent=%.3f\ndxgi=%.3f\npresentms=%.3f\nwaitms=%.3f\n"
-                 "interval=%d\nfocus=%d\ncaphint=%d\ncapfps=%.3f\n",
+                 "interval=%d\nfocus=%d\ncaphint=%d\ncapfps=%.3f\ndepth=%d\ndepthw=%u\ndepthh=%u\n",
                  s.stamp, s.pid, s.refreshHz, s.captureFps, s.presentFps, s.dxgiFps, s.presentMs, s.waitMs, s.interval, s.focus,
-                 s.capHint, s.capFps);
+                 s.capHint, s.capFps, s.depthState, s.depthW, s.depthH);
     std::fclose(f);
     MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
 }
@@ -271,6 +276,9 @@ inline bool ReadLiveStats(LiveStats& s)
         else if (!std::strcmp(k, "focus")) s.focus = static_cast<int>(d);
         else if (!std::strcmp(k, "caphint")) s.capHint = static_cast<int>(d);
         else if (!std::strcmp(k, "capfps")) s.capFps = d;
+        else if (!std::strcmp(k, "depth")) s.depthState = static_cast<int>(d);
+        else if (!std::strcmp(k, "depthw")) s.depthW = static_cast<unsigned>(d);
+        else if (!std::strcmp(k, "depthh")) s.depthH = static_cast<unsigned>(d);
         else
             continue;
         any = true;

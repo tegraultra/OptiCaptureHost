@@ -58,6 +58,7 @@
 #include <vector>
 
 #include "settings.h"
+#include "depth_share.h"
 #include "upscale_shader.h"
 #include "nis_shader.h"
 #include "nis_config.h"
@@ -574,6 +575,18 @@ class Host
     ComPtr<ID3D12RootSignature> fsrRoot_;
     ComPtr<ID3D12PipelineState> fsrBlockPso_, fsrPixelPso_;
     ComPtr<ID3D12Resource> fsrTex_[2], fsrBlk_, fsrMv_, fsrDepth_, fsrReact_, fsrOut_;
+    // Depth from the ReShade add-on (st_.depthSource == 1). With depthSource 0 none of this runs and the flat depth above is used,
+    // exactly as before. The add-on shares a texture of the game's linear depth; it is copied over fsrDepth_ every frame.
+    ComPtr<ID3D12Resource> rsDepth_;
+    HANDLE rsMap_ = nullptr;
+    ocdepth::Share* rsInfo_ = nullptr;
+    unsigned long long rsHandleSeen_ = 0;
+    unsigned long long rsFrameSeen_ = 0;
+    UINT rsW_ = 0, rsH_ = 0;
+    int rsState_ = 0; // 0 not used now, 1 waiting for the add-on, 4 could not open it (2 / 3 / 5 are worked out in PublishLive)
+    std::chrono::steady_clock::time_point rsTry_{};
+    void ConnectReshadeDepth();
+    void CloseReshadeDepth();
     bool fsrPipesOk_ = false;
     bool fsrReady_ = false;
     bool fsrHavePrev_ = false;
@@ -1537,6 +1550,7 @@ void Host::ReleaseFsrTemporal()
     fsrDepth_.Reset();
     fsrReact_.Reset();
     fsrOut_.Reset();
+    CloseReshadeDepth();
 }
 
 // The captured frame's size is fixed per shared texture: everything that depends on it (frame copies, vectors, depth, output and AMD's
@@ -1900,6 +1914,96 @@ void Host::ShutdownDlss() {}
 bool Host::RecordDlss(ID3D12Resource*, bool) { return false; }
 #endif
 
+void Host::CloseReshadeDepth()
+{
+    rsDepth_.Reset();
+    if (rsInfo_)
+    {
+        UnmapViewOfFile(rsInfo_);
+        rsInfo_ = nullptr;
+    }
+    if (rsMap_)
+    {
+        CloseHandle(rsMap_);
+        rsMap_ = nullptr;
+    }
+    rsHandleSeen_ = 0;
+    rsW_ = rsH_ = 0;
+}
+
+// Finds the memory block of the ReShade add-on inside the game, duplicates the handle of its shared depth texture into this process
+// and opens it. Called about once a second while that has not worked (or when the add-on made a new texture).
+void Host::ConnectReshadeDepth()
+{
+    DWORD pid = 0;
+    if (target_)
+        GetWindowThreadProcessId(target_, &pid);
+    if (pid == 0)
+        return;
+
+    if (!rsInfo_)
+    {
+        wchar_t name[96];
+        swprintf_s(name, L"Local\\OptiCaptureDepth_%lu", static_cast<unsigned long>(pid));
+        rsMap_ = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
+        if (!rsMap_)
+        {
+            rsState_ = 1; // the add-on is not running in the game (yet)
+            return;
+        }
+        rsInfo_ = static_cast<ocdepth::Share*>(MapViewOfFile(rsMap_, FILE_MAP_READ, 0, 0, sizeof(ocdepth::Share)));
+        if (!rsInfo_)
+        {
+            CloseHandle(rsMap_);
+            rsMap_ = nullptr;
+            rsState_ = 4;
+            return;
+        }
+    }
+    if (rsInfo_->magic != ocdepth::kMagic || rsInfo_->version != ocdepth::kVersion || rsInfo_->handle == 0)
+    {
+        rsState_ = 1;
+        return;
+    }
+    if (rsDepth_ && rsInfo_->handle == rsHandleSeen_)
+        return;
+
+    HANDLE proc = OpenProcess(PROCESS_DUP_HANDLE, FALSE, pid);
+    if (!proc)
+    {
+        rsState_ = 4;
+        Log("ReShade depth: cannot open the game process (error %lu). Run the game and the host with the same rights.",
+            static_cast<unsigned long>(GetLastError()));
+        return;
+    }
+    HANDLE mine = nullptr;
+    const BOOL dup = DuplicateHandle(proc, reinterpret_cast<HANDLE>(static_cast<uintptr_t>(rsInfo_->handle)), GetCurrentProcess(), &mine, 0,
+                                     FALSE, DUPLICATE_SAME_ACCESS);
+    CloseHandle(proc);
+    if (!dup || !mine)
+    {
+        rsState_ = 4;
+        Log("ReShade depth: could not take over the shared handle (error %lu)", static_cast<unsigned long>(GetLastError()));
+        return;
+    }
+    ComPtr<ID3D12Resource> res;
+    const HRESULT hr = dev12_->OpenSharedHandle(mine, IID_PPV_ARGS(&res));
+    CloseHandle(mine);
+    if (FAILED(hr) || !res)
+    {
+        rsState_ = 4;
+        Log("ReShade depth: OpenSharedHandle failed (0x%08lX)", static_cast<unsigned long>(hr));
+        return;
+    }
+    rsDepth_ = res;
+    rsHandleSeen_ = rsInfo_->handle;
+    const D3D12_RESOURCE_DESC d = res->GetDesc();
+    rsW_ = static_cast<UINT>(d.Width);
+    rsH_ = d.Height;
+    rsState_ = 1;
+    Log("ReShade depth: opened the game's shared depth (%ux%u, game API Direct3D %u)", rsW_, rsH_, rsInfo_->api);
+}
+
 // Per frame, before the final pass: the captured frame is copied, its motion measured against the frame before, and AMD's upscaler runs.
 void Host::RecordFsrTemporal()
 {
@@ -1948,6 +2052,25 @@ void Host::RecordFsrTemporal()
     barrier(fsrMv_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
     barrier(fsrDepth_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
     barrier(fsrReact_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nps);
+
+    // Depth source "ReShade": the game's real depth replaces the flat depth the pixel pass just wrote. Only when it has the same size
+    // as the captured picture; otherwise (or while the add-on is not there) the flat depth stays, as before.
+    if (st_.depthSource == 1)
+    {
+        const auto t = std::chrono::steady_clock::now();
+        const bool need = !rsDepth_ || !rsInfo_ || rsInfo_->handle != rsHandleSeen_;
+        if (need && t - rsTry_ > std::chrono::seconds(1))
+        {
+            rsTry_ = t;
+            ConnectReshadeDepth();
+        }
+        if (rsDepth_ && rsW_ == width_ && rsH_ == height_)
+        {
+            barrier(fsrDepth_.Get(), nps, D3D12_RESOURCE_STATE_COPY_DEST);
+            list_->CopyResource(fsrDepth_.Get(), rsDepth_.Get());
+            barrier(fsrDepth_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, nps);
+        }
+    }
 
     const auto now = std::chrono::steady_clock::now();
     float frameMs = static_cast<float>(std::chrono::duration<double, std::milli>(now - fsrLast_).count());
@@ -2699,6 +2822,29 @@ void Host::PublishLive(std::chrono::steady_clock::time_point now)
     ls.interval = lastInterval_;
     const HWND fg = GetForegroundWindow();
     ls.focus = fg == target_ ? 0 : (fg == overlay_ ? 1 : 2);
+
+    // what the launcher shows for the depth source: 0 flat / not used, 1 waiting for the add-on, 2 receiving, 3 other size, 4 cannot open,
+    // 5 the add-on is there but sends no new pictures (is the effect OptiCaptureDepth ticked on in ReShade?)
+    if (st_.depthSource == 1)
+    {
+        int ds = rsState_;
+        if (rsDepth_ && rsInfo_)
+        {
+            if (rsW_ != width_ || rsH_ != height_)
+            {
+                ds = 3;
+            }
+            else
+            {
+                const unsigned long long f = rsInfo_->frame;
+                ds = f != rsFrameSeen_ ? 2 : 5;
+                rsFrameSeen_ = f;
+            }
+        }
+        ls.depthState = ds;
+        ls.depthW = rsW_;
+        ls.depthH = rsH_;
+    }
 
     // Does the game look capped? Windows Graphics Capture reports an uncapped game at (at most) the refresh rate, so
     // "at the refresh rate" proves nothing. A capture rate that stays almost exactly the same for several seconds and
