@@ -243,6 +243,8 @@ struct MouseRemapState
     ULONGLONG warpStart = 0; // the game moving the cursor by itself (mouse look with a visible pointer)
     int warpCount = 0;
     ULONGLONG lookUntil = 0;
+    std::atomic<ULONGLONG> freeMoveTick{ 0 }; // last real mouse move that was not remapped
+    ULONGLONG hiddenSince = 0;
 };
 
 MouseRemapState g_mouseRemap;
@@ -284,6 +286,8 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
         // While a button is held (drag, right-button look) the game works with the real cursor as it is: no remap.
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_MBUTTONDOWN)
             g_mouseRemap.remap.store(false, std::memory_order_release);
+        if (ms && !(ms->flags & LLMHF_INJECTED) && wParam == WM_MOUSEMOVE && !g_mouseRemap.remap.load(std::memory_order_acquire))
+            g_mouseRemap.freeMoveTick.store(GetTickCount64(), std::memory_order_release);
         if (ms && !(ms->flags & LLMHF_INJECTED) && wParam == WM_MOUSEMOVE && g_mouseRemap.remap.load(std::memory_order_acquire) &&
             g_mouseRemap.virtInit)
         {
@@ -3262,6 +3266,10 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
             if (++g_mouseRemap.warpCount >= 3)
                 g_mouseRemap.lookUntil = t + 400;
         }
+        // Mouse look goes on as long as the mouse keeps moving; it ends a moment after it stops.
+        if (t < g_mouseRemap.lookUntil && t - g_mouseRemap.freeMoveTick.load(std::memory_order_acquire) < 300)
+            g_mouseRemap.lookUntil = t + 400;
+        g_mouseRemap.hiddenSince = 0;
         const bool look = t < g_mouseRemap.lookUntil;
         // Held button or mouse look: the real cursor is the truth, the drawn pointer just follows it.
         if (btnDown || look || warped || !g_mouseRemap.virtInit)
@@ -3278,7 +3286,12 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
         g_mouseRemap.remap.store(false, std::memory_order_release);
         g_mouseRemap.virtInit = false;
         CursorWindowHide();
-        RestoreSystemCursors();
+        // A game that hides and shows its pointer all the time must not make the real one flash: restore only after a pause.
+        const ULONGLONG t = GetTickCount64();
+        if (g_mouseRemap.hiddenSince == 0)
+            g_mouseRemap.hiddenSince = t;
+        if (t - g_mouseRemap.hiddenSince > 700)
+            RestoreSystemCursors();
     }
 
     // Re-unlock cursor periodically whenever the game clips/locks it to a smaller rectangle
