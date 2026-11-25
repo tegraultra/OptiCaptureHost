@@ -812,11 +812,6 @@ std::wstring RtssDir()
     return dir;
 }
 
-bool FileExists(const std::wstring& f)
-{
-    return GetFileAttributesW(f.c_str()) != INVALID_FILE_ATTRIBUTES;
-}
-
 // Install folder of RTSS (trailing backslash) when RTSSHooks64.dll is there, else empty. Not installed = empty.
 std::wstring RtssInstallDir()
 {
