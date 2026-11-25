@@ -217,13 +217,11 @@ void BoostProcess(int level)
 
 // ---------------------------------------------------------------------------------------------------------------
 // ---------------------------------------------------------------------------------------------------------------
-// Output-scaling mouse click mapping & ClipCursor unlock
+// Output-scaling mouse click mapping & ClipCursor unlock (no jump on click)
 // ---------------------------------------------------------------------------------------------------------------
-// When output scaling downscales the game window (gameW x gameH) and stretches it across the full monitor
-// (outW x outH) on the overlay, games may clip ClipCursor() to their small window and receive clicks at
-// unscaled coordinates. We keep ClipCursor(nullptr) enforced while the game is focused (outside interactive mode)
-// and map button press/release coordinates proportionally into the game's smaller client rect without swallowing
-// WM_MOUSEMOVE.
+// When output scaling downscales the game window and stretches it across the overlay, games may clip ClipCursor()
+// to their small window. We unlock small ClipCursor() rectangles while the game is focused (outside interactive mode)
+// and avoid calling SetCursorPos() on button down/up so the cursor never jumps on click.
 struct MouseRemapState
 {
     std::atomic<bool> active{ false };
@@ -240,7 +238,7 @@ struct MouseRemapState
 
 MouseRemapState g_mouseRemap;
 
-static bool IsClickRemapMessage(WPARAM msg)
+static bool IsClickButtonMessage(WPARAM msg)
 {
     return msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
            msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
@@ -260,33 +258,10 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
                 return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
             }
 
-            if (IsClickRemapMessage(wParam))
+            // Do not call SetCursorPos() on button down/up so the cursor never jumps on click.
+            if (IsClickButtonMessage(wParam))
             {
-                const RECT gr = g_mouseRemap.gameClientScreen;
-                const RECT ov = g_mouseRemap.overlayScreen;
-                const UINT gw = g_mouseRemap.gameW;
-                const UINT gh = g_mouseRemap.gameH;
-                const UINT ow = g_mouseRemap.outW;
-                const UINT oh = g_mouseRemap.outH;
-
-                if (gw > 1 && gh > 1 && ow > gw && oh > gh)
-                {
-                    const double normX = std::clamp(
-                        (static_cast<double>(ms->pt.x) - static_cast<double>(ov.left)) / static_cast<double>(ow - 1),
-                        0.0, 1.0);
-                    const double normY = std::clamp(
-                        (static_cast<double>(ms->pt.y) - static_cast<double>(ov.top)) / static_cast<double>(oh - 1),
-                        0.0, 1.0);
-
-                    const LONG mappedX = gr.left + static_cast<LONG>(std::lround(normX * static_cast<double>(gw - 1)));
-                    const LONG mappedY = gr.top  + static_cast<LONG>(std::lround(normY * static_cast<double>(gh - 1)));
-
-                    if (mappedX != ms->pt.x || mappedY != ms->pt.y)
-                    {
-                        g_mouseRemap.selfMove.store(true, std::memory_order_release);
-                        SetCursorPos(mappedX, mappedY);
-                    }
-                }
+                return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
             }
         }
     }
