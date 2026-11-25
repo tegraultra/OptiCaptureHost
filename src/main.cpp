@@ -3353,6 +3353,30 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
             g_mouseRemap.lookUntil = t + 1000;
         g_mouseRemap.hiddenSince = 0;
         const bool look = t < g_mouseRemap.lookUntil;
+        // During mouse look (camera rotation) the cursor is hidden: skip all heavy per-frame work
+        // (GDI cursor ops, system calls, MapGameToVirtual) to avoid frame drops on the render thread.
+        if (look)
+        {
+            // Extend lookUntil so continuous camera rotation keeps the fast path active
+            g_mouseRemap.lookUntil = t + 1000;
+            g_mouseRemap.remap.store(false, std::memory_order_release);
+            // Only ClipCursor unlock, and only every 100 ms
+            if (t - g_mouseRemap.lastUnlockTick >= 100)
+            {
+                g_mouseRemap.lastUnlockTick = t;
+                RECT curClip{};
+                if (GetClipCursor(&curClip))
+                {
+                    const int clipW = curClip.right - curClip.left;
+                    const int clipH = curClip.bottom - curClip.top;
+                    const int ovW = g_mouseRemap.overlayScreen.right - g_mouseRemap.overlayScreen.left;
+                    const int ovH = g_mouseRemap.overlayScreen.bottom - g_mouseRemap.overlayScreen.top;
+                    if (clipW > 0 && clipH > 0 && (clipW < ovW - 8 || clipH < ovH - 8))
+                        ClipCursor(nullptr);
+                }
+            }
+            return;
+        }
         // Held button or mouse look: the real cursor is the truth, the drawn pointer just follows it.
         if (btnDown || look || warped || !init)
             MapGameToVirtual(g_mouseRemap, cur);
