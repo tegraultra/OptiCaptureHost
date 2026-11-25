@@ -13,7 +13,6 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
-#include <vector>
 
 #include "../depth_share.h"
 
@@ -24,6 +23,7 @@ namespace
 std::mutex g_mutex;
 device* g_device = nullptr;
 resource g_shared = { 0 };
+resource g_staging = { 0 };
 void* g_handle = nullptr; // NT handle (kept open for as long as the texture lives)
 uint32_t g_w = 0, g_h = 0;
 HANDLE g_map = nullptr;
@@ -80,6 +80,11 @@ bool OpenInfo()
 
 void DropCpuBuffer()
 {
+    if (g_staging.handle != 0 && g_device)
+    {
+        g_device->destroy_resource(g_staging);
+        g_staging = { 0 };
+    }
     if (g_cpuHdr)
     {
         UnmapViewOfFile(g_cpuHdr);
@@ -94,14 +99,22 @@ void DropCpuBuffer()
     g_cpuCapBytes = 0;
 }
 
-bool EnsureCpuBuffer(uint32_t w, uint32_t h)
+bool EnsureCpuBuffer(device* dev, uint32_t w, uint32_t h)
 {
     const size_t dataBytes = static_cast<size_t>(w) * static_cast<size_t>(h) * sizeof(float);
     const size_t totalBytes = sizeof(ocdepth::CpuHeader) + dataBytes;
-    if (g_cpuHdr && g_cpuCapBytes >= totalBytes && g_w == w && g_h == h)
+    if (g_cpuHdr && g_staging.handle != 0 && g_cpuCapBytes >= totalBytes && g_w == w && g_h == h)
         return true;
 
     DropCpuBuffer();
+
+    const resource_desc stDesc(w, h, 1, 1, format::r32_float, 1, memory_heap::gpu_to_cpu, resource_usage::copy_dest);
+    if (!dev->create_resource(stDesc, nullptr, resource_usage::copy_dest, &g_staging) || g_staging.handle == 0)
+    {
+        g_staging = { 0 };
+        return false;
+    }
+
     char name[96];
     std::snprintf(name, sizeof(name), "Local\\OptiCaptureDepthCpu_%lu", GetCurrentProcessId());
     g_cpuMap = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, static_cast<DWORD>(totalBytes >> 32), name);
@@ -110,13 +123,19 @@ bool EnsureCpuBuffer(uint32_t w, uint32_t h)
         g_cpuMap = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, static_cast<DWORD>(totalBytes & 0xFFFFFFFFULL), name);
     }
     if (!g_cpuMap)
+    {
+        dev->destroy_resource(g_staging);
+        g_staging = { 0 };
         return false;
+    }
 
     void* view = MapViewOfFile(g_cpuMap, FILE_MAP_ALL_ACCESS, 0, 0, totalBytes);
     if (!view)
     {
         CloseHandle(g_cpuMap);
         g_cpuMap = nullptr;
+        dev->destroy_resource(g_staging);
+        g_staging = { 0 };
         return false;
     }
 
@@ -202,7 +221,7 @@ bool MakeShared(effect_runtime* runtime, device* dev, uint32_t w, uint32_t h)
     }
 
     // Fallback: CPU shared memory for APIs without NT shared texture handles (D3D9, D3D10, OpenGL, Vulkan).
-    if (!EnsureCpuBuffer(w, h))
+    if (!EnsureCpuBuffer(dev, w, h))
     {
         Say(reshade::log::level::error, "OptiCaptureDepth: could not create CPU shared depth buffer.");
         g_failed = true;
@@ -260,7 +279,7 @@ void OnFinishEffects(effect_runtime* runtime, command_list* cmd_list, resource_v
 
     g_device = dev;
     if ((!g_useCpu && (g_shared == 0 || g_w != sd.texture.width || g_h != sd.texture.height)) ||
-        (g_useCpu && (!g_cpuHdr || g_w != sd.texture.width || g_h != sd.texture.height)))
+        (g_useCpu && (!g_cpuHdr || g_staging.handle == 0 || g_w != sd.texture.width || g_h != sd.texture.height)))
     {
         if (!MakeShared(runtime, dev, sd.texture.width, sd.texture.height))
             return;
@@ -280,25 +299,35 @@ void OnFinishEffects(effect_runtime* runtime, command_list* cmd_list, resource_v
         if (g_info)
             InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&g_info->frame));
     }
-    else if (g_cpuHdr && g_cpuPixels)
+    else if (g_cpuHdr && g_cpuPixels && g_staging.handle != 0)
     {
-        const uint32_t w = sd.texture.width;
-        const uint32_t h = sd.texture.height;
-        const size_t rowFloats = static_cast<size_t>(w);
-        std::vector<uint8_t> raw;
-        if (runtime->download_texture_region(src, 0, nullptr, raw))
+        cmd_list->barrier(src, resource_usage::shader_resource, resource_usage::copy_source);
+        cmd_list->barrier(g_staging, resource_usage::copy_dest, resource_usage::copy_dest);
+        cmd_list->copy_resource(src, g_staging);
+        cmd_list->barrier(src, resource_usage::copy_source, resource_usage::shader_resource);
+
+        if (runtime->get_command_queue())
+            runtime->get_command_queue()->flush_immediate_command_list();
+
+        subresource_data mapped{};
+        if (dev->map_texture_region(g_staging, 0, nullptr, map_access::read_only, &mapped))
         {
-            const size_t expected = rowFloats * static_cast<size_t>(h) * sizeof(float);
-            if (raw.size() >= expected)
-            {
-                std::memcpy(g_cpuPixels, raw.data(), expected);
-                g_cpuHdr->width = w;
-                g_cpuHdr->height = h;
-                g_cpuHdr->rowPitchBytes = static_cast<uint32_t>(rowFloats * sizeof(float));
-                InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&g_cpuHdr->frame));
-                if (g_info)
-                    InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&g_info->frame));
-            }
+            const uint32_t w = sd.texture.width;
+            const uint32_t h = sd.texture.height;
+            const size_t dstRowBytes = static_cast<size_t>(w) * sizeof(float);
+            const size_t srcPitchBytes = mapped.row_pitch >= dstRowBytes ? static_cast<size_t>(mapped.row_pitch) : dstRowBytes;
+            const auto* srcBytes = static_cast<const uint8_t*>(mapped.data);
+            auto* dstBytes = reinterpret_cast<uint8_t*>(g_cpuPixels);
+            for (uint32_t y = 0; y < h; ++y)
+                std::memcpy(dstBytes + static_cast<size_t>(y) * dstRowBytes, srcBytes + static_cast<size_t>(y) * srcPitchBytes, dstRowBytes);
+            dev->unmap_texture_region(g_staging, 0);
+
+            g_cpuHdr->width = w;
+            g_cpuHdr->height = h;
+            g_cpuHdr->rowPitchBytes = static_cast<uint32_t>(dstRowBytes);
+            InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&g_cpuHdr->frame));
+            if (g_info)
+                InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&g_info->frame));
         }
     }
 }
