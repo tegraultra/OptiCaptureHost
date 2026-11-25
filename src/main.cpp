@@ -250,6 +250,8 @@ struct MouseRemapState
 
 MouseRemapState g_mouseRemap;
 
+bool g_labelTextVisible = true;
+
 // Position of the real cursor for the game from the position the user sees on the stretched picture.
 struct RemapLock
 {
@@ -916,7 +918,10 @@ LRESULT CALLBACK LabelProc(HWND h, UINT m, WPARAM w, LPARAM l)
                               CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         HGDIOBJ old = SelectObject(dc, f);
         SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(120, 255, 140));
+        if (g_labelTextVisible)
+            SetTextColor(dc, RGB(120, 255, 140));
+        else
+            SetTextColor(dc, RGB(12, 12, 16)); // match background -> invisible text
         DrawTextW(dc, t, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(dc, old);
         DeleteObject(f);
@@ -1532,7 +1537,9 @@ void Host::CreateLabel()
         return;
     SetLayeredWindowAttributes(label_, 0, 215, LWA_ALPHA);
     ShowWindow(label_, SW_SHOWNOACTIVATE);
-    labelAlways_ = st_.labelSeconds >= 999;
+    // Always keep the label window alive (even after timeout) to maintain DWM stability.
+    // The text becomes invisible (background color) but the window remains composed by DWM.
+    labelAlways_ = true;
     labelUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(st_.labelSeconds);
 }
 
@@ -1552,22 +1559,24 @@ void Host::UpdateLabel()
             SetWindowTextW(label_, text);
             InvalidateRect(label_, nullptr, TRUE);
             labelUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(st_.labelSeconds);
+            g_labelTextVisible = true; // text visible again when resolution changes
         }
         else
         {
             CreateLabel();
         }
     }
+    // After labelUntil_, make text invisible but keep window alive
+    if (label_ && g_labelTextVisible && std::chrono::steady_clock::now() > labelUntil_)
+    {
+        g_labelTextVisible = false;
+        InvalidateRect(label_, nullptr, TRUE);
+    }
     if (!label_)
         return;
-    if (!labelAlways_ && std::chrono::steady_clock::now() > labelUntil_)
-    {
-        // Keep the label window visible but make it fully transparent (alpha 0).
-        // This keeps DWM composing it every frame (maintaining stability) while making it invisible.
-        SetLayeredWindowAttributes(label_, 0, 0, LWA_ALPHA);
-        return;
-    }
-    // stay above the overlay (even when hidden, this keeps DWM stable)
+    // labelAlways_ is forced true, so the label never times out.
+    // The text visibility is controlled by g_labelTextVisible (set to false after labelUntil_).
+    // stay above the overlay
     SetWindowPos(label_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
