@@ -1562,11 +1562,15 @@ void Host::UpdateLabel()
         return;
     if (!labelAlways_ && std::chrono::steady_clock::now() > labelUntil_)
     {
-        DestroyWindow(label_);
-        label_ = nullptr;
+        // Don't destroy the label window: keep it alive but hidden. Calling SetWindowPos on this small
+        // topmost window every 250 ms keeps DWM in a stable composition state, which prevents frame
+        // drops during camera rotation. Destroying it causes DWM to re-compose the large overlay.
+        ShowWindow(label_, SW_HIDE);
+        // Keep calling SetWindowPos on the (now hidden) label to maintain DWM stability
+        SetWindowPos(label_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
         return;
     }
-    // stay above the overlay
+    // stay above the overlay (even when hidden, this keeps DWM stable)
     SetWindowPos(label_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
@@ -3234,18 +3238,16 @@ void Host::MoveOverlay()
         lastBounds_ = {};
     }
 
-    const bool inMouseLook = GetTickCount64() < g_mouseRemap.lookUntil;
     if (r.left != lastBounds_.left || r.top != lastBounds_.top || r.right != lastBounds_.right || r.bottom != lastBounds_.bottom)
     {
         lastBounds_ = r;
         SetWindowPos(overlay_, HWND_TOPMOST, ovX, ovY, static_cast<int>(outW_), static_cast<int>(outH_), SWP_NOACTIVATE);
     }
-    else if (!inMouseLook)
+    else
     {
         // Keep the overlay above a game that re-asserts its own topmost state (but not above the launcher window).
         // Only when some other window actually got above the overlay: re-ordering the topmost windows every 250 ms
         // while the game is running makes DWM redo its composition and costs the game frames.
-        // Skip entirely during mouse look (camera rotation) to avoid frame drops.
         if (!LauncherInFront() && GetWindow(overlay_, GW_HWNDPREV) != nullptr)
             SetWindowPos(overlay_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
@@ -3265,9 +3267,6 @@ void Host::EnforceOverlayStyle()
 
     const LONG_PTR have = GetWindowLongPtrW(overlay_, GWL_EXSTYLE);
     if ((have & mask) == want)
-        return;
-    // Skip style enforcement during mouse look to avoid DWM re-composition
-    if (GetTickCount64() < g_mouseRemap.lookUntil)
         return;
 
     Log("Overlay style was changed from outside (0x%08lX), restoring it", static_cast<unsigned long>(have));
