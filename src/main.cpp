@@ -271,10 +271,8 @@ static POINT MapVirtualToGame(const MouseRemapState& m)
     POINT p;
     p.x = m.gameClientScreen.left + static_cast<LONG>(std::floor((m.virtX - m.overlayScreen.left) * fx));
     p.y = m.gameClientScreen.top + static_cast<LONG>(std::floor((m.virtY - m.overlayScreen.top) * fy));
-    // Add 2-pixel margin from edges to avoid ClipCursor issues when clicking at boundaries
-    const LONG margin = 2;
-    p.x = std::clamp<LONG>(p.x, m.gameClientScreen.left + margin, m.gameClientScreen.right - 1 - margin);
-    p.y = std::clamp<LONG>(p.y, m.gameClientScreen.top + margin, m.gameClientScreen.bottom - 1 - margin);
+    p.x = std::clamp<LONG>(p.x, m.gameClientScreen.left, m.gameClientScreen.right - 1);
+    p.y = std::clamp<LONG>(p.y, m.gameClientScreen.top, m.gameClientScreen.bottom - 1);
     return p;
 }
 
@@ -295,13 +293,6 @@ static void MapGameToVirtual(MouseRemapState& m, POINT cur)
 
 LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-    // Fastest possible path: if remap is off (mouse look / button held), pass through immediately.
-    // No system calls, no locks, no atomics beyond one load.
-    if (nCode == HC_ACTION && g_mouseRemap.active.load(std::memory_order_relaxed) &&
-        !g_mouseRemap.remap.load(std::memory_order_relaxed))
-    {
-        return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
-    }
     if (nCode == HC_ACTION && g_mouseRemap.active.load(std::memory_order_acquire))
     {
         auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
@@ -309,12 +300,7 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_MBUTTONDOWN)
             g_mouseRemap.remap.store(false, std::memory_order_release);
         if (ms && !(ms->flags & LLMHF_INJECTED) && wParam == WM_MOUSEMOVE && !g_mouseRemap.remap.load(std::memory_order_acquire))
-        {
-            // Rate-limit freeMoveTick updates to avoid 1000 Hz atomic writes
-            const ULONGLONG now = GetTickCount64();
-            if (now - g_mouseRemap.freeMoveTick.load(std::memory_order_relaxed) >= 8)
-                g_mouseRemap.freeMoveTick.store(now, std::memory_order_relaxed);
-        }
+            g_mouseRemap.freeMoveTick.store(GetTickCount64(), std::memory_order_release);
         if (ms && !(ms->flags & LLMHF_INJECTED) && wParam == WM_MOUSEMOVE && g_mouseRemap.remap.load(std::memory_order_acquire) &&
             g_mouseRemap.virtInit)
         {
@@ -352,7 +338,7 @@ static void StartMouseHookThread(HINSTANCE inst)
     g_hookThread = std::thread([inst] {
         MSG msg;
         PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE); // creates the message queue
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
         g_mouseRemap.hook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, inst, 0);
         g_hookThreadId.store(GetCurrentThreadId(), std::memory_order_release);
         while (GetMessageW(&msg, nullptr, 0, 0) > 0)
@@ -1528,16 +1514,13 @@ void Host::CreateLabel()
     static const wchar_t* const lvNames[] = { L"Quality", L"Balanced", L"Performance", L"Native" };
     swprintf(text, 64, L"%u to %u  (%s \u00B7 %s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 5) ? upMethod_ : 0],
              lvNames[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 3) ? st_.upscaleLevel : 0]);
-    // Create the label window exactly as originally: visible at top-left of monitor.
-    // This keeps DWM stable (prevents frame drops during camera rotation).
-    // Make it permanent by forcing labelAlways_ = true.
     label_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT, wc.lpszClassName,
                              text, WS_POPUP, mi.rcMonitor.left + 16, mi.rcMonitor.top + 16, 400, 40, nullptr, nullptr, inst_, nullptr);
     if (!label_)
         return;
     SetLayeredWindowAttributes(label_, 0, 215, LWA_ALPHA);
     ShowWindow(label_, SW_SHOWNOACTIVATE);
-    // Force permanent label - never destroy, never hide. This maintains DWM stability forever.
+    // Force label to stay alive forever - invisible after timeout but window remains for DWM stability
     labelAlways_ = true;
     labelUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(st_.labelSeconds);
 }
@@ -1564,11 +1547,14 @@ void Host::UpdateLabel()
             CreateLabel();
         }
     }
-    // After labelUntil_, make text invisible but keep window alive
     if (!label_)
         return;
-    // labelAlways_ is forced true - label stays visible forever.
-    // This keeps DWM stable (prevents frame drops during camera rotation).
+    if (!labelAlways_ && std::chrono::steady_clock::now() > labelUntil_)
+    {
+        // Make label invisible (alpha 0) but KEEP the window alive for DWM stability
+        SetLayeredWindowAttributes(label_, 0, 0, LWA_ALPHA);
+        // Don't destroy - window stays to keep DWM composition stable
+    }
     // stay above the overlay
     SetWindowPos(label_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
@@ -3337,31 +3323,6 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
     CURSORINFO ci{};
     ci.cbSize = sizeof(ci);
     const bool pointerShown = GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && ci.hCursor;
-
-    // During mouse look (hidden cursor): skip all heavy per-frame work to avoid frame drops.
-    if (!pointerShown)
-    {
-        g_mouseRemap.remap.store(false, std::memory_order_release);
-        // Extend lookUntil to keep fast path active
-        g_mouseRemap.lookUntil = GetTickCount64() + 2000;
-        // Only ClipCursor unlock, every 100 ms
-        const ULONGLONG nowTick = GetTickCount64();
-        if (nowTick - g_mouseRemap.lastUnlockTick >= 100)
-        {
-            g_mouseRemap.lastUnlockTick = nowTick;
-            RECT curClip{};
-            if (GetClipCursor(&curClip))
-            {
-                const int clipW = curClip.right - curClip.left;
-                const int clipH = curClip.bottom - curClip.top;
-                const int ovW = g_mouseRemap.overlayScreen.right - g_mouseRemap.overlayScreen.left;
-                const int ovH = g_mouseRemap.overlayScreen.bottom - g_mouseRemap.overlayScreen.top;
-                if (clipW > 0 && clipH > 0 && (clipW < ovW - 8 || clipH < ovH - 8))
-                    ClipCursor(nullptr);
-            }
-        }
-        return;
-    }
     if (pointerShown)
     {
         POINT cur{};
