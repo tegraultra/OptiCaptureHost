@@ -226,6 +226,8 @@ struct MouseRemapState
 {
     std::atomic<bool> active{ false };
     std::atomic<bool> selfMove{ false };
+    // Position remap: the real cursor travels over the whole (stretched) overlay, the game only has a small window.
+    std::atomic<bool> remap{ false };
     HHOOK hook = nullptr;
     RECT gameClientScreen{};
     RECT overlayScreen{};
@@ -234,15 +236,41 @@ struct MouseRemapState
     UINT outW = 0;
     UINT outH = 0;
     ULONGLONG lastUnlockTick = 0;
+    bool virtInit = false;
+    double virtX = 0.0; // where the user sees the pointer (overlay / screen coordinates)
+    double virtY = 0.0;
+    POINT lastSet{};    // where the real cursor was put for the game
 };
 
 MouseRemapState g_mouseRemap;
 
-static bool IsClickButtonMessage(WPARAM msg)
+// Position of the real cursor for the game from the position the user sees on the stretched picture.
+static POINT MapVirtualToGame(const MouseRemapState& m)
 {
-    return msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
-           msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
-           msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP;
+    const double ow = static_cast<double>(m.overlayScreen.right - m.overlayScreen.left);
+    const double oh = static_cast<double>(m.overlayScreen.bottom - m.overlayScreen.top);
+    const double fx = ow > 0.0 ? static_cast<double>(m.gameW) / ow : 1.0;
+    const double fy = oh > 0.0 ? static_cast<double>(m.gameH) / oh : 1.0;
+    POINT p;
+    p.x = m.gameClientScreen.left + static_cast<LONG>(std::floor((m.virtX - m.overlayScreen.left) * fx));
+    p.y = m.gameClientScreen.top + static_cast<LONG>(std::floor((m.virtY - m.overlayScreen.top) * fy));
+    p.x = std::clamp<LONG>(p.x, m.gameClientScreen.left, m.gameClientScreen.right - 1);
+    p.y = std::clamp<LONG>(p.y, m.gameClientScreen.top, m.gameClientScreen.bottom - 1);
+    return p;
+}
+
+static void MapGameToVirtual(MouseRemapState& m, POINT cur)
+{
+    const double ow = static_cast<double>(m.overlayScreen.right - m.overlayScreen.left);
+    const double oh = static_cast<double>(m.overlayScreen.bottom - m.overlayScreen.top);
+    const double gw = static_cast<double>(m.gameW > 0 ? m.gameW : 1);
+    const double gh = static_cast<double>(m.gameH > 0 ? m.gameH : 1);
+    m.virtX = m.overlayScreen.left + (static_cast<double>(cur.x - m.gameClientScreen.left) + 0.5) * ow / gw;
+    m.virtY = m.overlayScreen.top + (static_cast<double>(cur.y - m.gameClientScreen.top) + 0.5) * oh / gh;
+    m.virtX = std::clamp(m.virtX, static_cast<double>(m.overlayScreen.left), static_cast<double>(m.overlayScreen.right - 1));
+    m.virtY = std::clamp(m.virtY, static_cast<double>(m.overlayScreen.top), static_cast<double>(m.overlayScreen.bottom - 1));
+    m.lastSet = cur;
+    m.virtInit = true;
 }
 
 LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
@@ -250,22 +278,281 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
     if (nCode == HC_ACTION && g_mouseRemap.active.load(std::memory_order_acquire))
     {
         auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
-        if (ms && !(ms->flags & LLMHF_INJECTED))
+        if (ms && !(ms->flags & LLMHF_INJECTED) && wParam == WM_MOUSEMOVE && g_mouseRemap.remap.load(std::memory_order_acquire) &&
+            g_mouseRemap.virtInit)
         {
-            if (g_mouseRemap.selfMove.load(std::memory_order_acquire))
+            // The system moves the cursor by (new - lastSet) from where we put it. Take that as the user's movement on the
+            // big picture, then put the real cursor where the game has to see it. Clicks are left alone: they happen at
+            // the real cursor, which is then over the right spot of the game window.
+            const int dx = ms->pt.x - g_mouseRemap.lastSet.x;
+            const int dy = ms->pt.y - g_mouseRemap.lastSet.y;
+            if (dx != 0 || dy != 0)
             {
-                g_mouseRemap.selfMove.store(false, std::memory_order_release);
-                return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
-            }
-
-            // Do not call SetCursorPos() on button down/up so the cursor never jumps on click.
-            if (IsClickButtonMessage(wParam))
-            {
-                return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
+                g_mouseRemap.virtX = std::clamp(g_mouseRemap.virtX + dx, static_cast<double>(g_mouseRemap.overlayScreen.left),
+                                                static_cast<double>(g_mouseRemap.overlayScreen.right - 1));
+                g_mouseRemap.virtY = std::clamp(g_mouseRemap.virtY + dy, static_cast<double>(g_mouseRemap.overlayScreen.top),
+                                                static_cast<double>(g_mouseRemap.overlayScreen.bottom - 1));
+                const POINT p = MapVirtualToGame(g_mouseRemap);
+                g_mouseRemap.lastSet = p;
+                SetCursorPos(p.x, p.y);
+                return 1;
             }
         }
     }
     return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
+}
+
+// With the remap the real cursor sits in the small game window, so it is hidden (system cursors made invisible) and the
+// pointer the user sees is drawn by a small click-through window that follows the position on the stretched picture.
+struct CursorOverlay
+{
+    static constexpr int kCount = 14;
+    HWND wnd = nullptr;
+    bool classRegistered = false;
+    bool blanked = false;
+    HCURSOR blankCur = nullptr;
+    HCURSOR lastCur = nullptr;
+    HDC memDc = nullptr;
+    HBITMAP dib = nullptr;
+    HGDIOBJ oldBmp = nullptr;
+    void* bits = nullptr;
+    int w = 0, h = 0, hotX = 0, hotY = 0;
+    HCURSOR orig[kCount] = {};
+    HCURSOR blankH[kCount] = {};
+};
+
+CursorOverlay g_cursorOv;
+
+static const int kSysCursorIds[CursorOverlay::kCount] = { 32512, 32513, 32514, 32515, 32516, 32642, 32643,
+                                                          32644, 32645, 32646, 32648, 32649, 32650, 32651 };
+
+static HCURSOR OriginalForBlank(HCURSOR cur)
+{
+    for (int i = 0; i < CursorOverlay::kCount; ++i)
+        if (g_cursorOv.blankH[i] && g_cursorOv.blankH[i] == cur)
+            return g_cursorOv.orig[i];
+    return nullptr;
+}
+
+static void BlankSystemCursors(HINSTANCE inst)
+{
+    if (g_cursorOv.blanked)
+        return;
+    BYTE andMask[128];
+    BYTE xorMask[128];
+    memset(andMask, 0xFF, sizeof(andMask));
+    memset(xorMask, 0x00, sizeof(xorMask));
+    g_cursorOv.blankCur = CreateCursor(inst, 0, 0, 32, 32, andMask, xorMask);
+    if (!g_cursorOv.blankCur)
+        return;
+    for (int i = 0; i < CursorOverlay::kCount; ++i)
+    {
+        HCURSOR c = LoadCursorW(nullptr, MAKEINTRESOURCEW(kSysCursorIds[i]));
+        g_cursorOv.orig[i] = c ? CopyIcon(c) : nullptr;
+    }
+    for (int i = 0; i < CursorOverlay::kCount; ++i)
+    {
+        HCURSOR copy = CopyIcon(g_cursorOv.blankCur);
+        if (copy)
+            SetSystemCursor(copy, kSysCursorIds[i]); // takes the handle
+    }
+    for (int i = 0; i < CursorOverlay::kCount; ++i)
+        g_cursorOv.blankH[i] = LoadCursorW(nullptr, MAKEINTRESOURCEW(kSysCursorIds[i]));
+    g_cursorOv.blanked = true;
+    g_cursorOv.lastCur = nullptr;
+}
+
+static void RestoreSystemCursors()
+{
+    if (!g_cursorOv.blanked)
+        return;
+    SystemParametersInfoW(SPI_SETCURSORS, 0, nullptr, 0); // reloads the user's own cursors
+    g_cursorOv.blanked = false;
+    for (int i = 0; i < CursorOverlay::kCount; ++i)
+    {
+        if (g_cursorOv.orig[i])
+            DestroyIcon(g_cursorOv.orig[i]);
+        g_cursorOv.orig[i] = nullptr;
+        g_cursorOv.blankH[i] = nullptr;
+    }
+    if (g_cursorOv.blankCur)
+    {
+        DestroyCursor(g_cursorOv.blankCur);
+        g_cursorOv.blankCur = nullptr;
+    }
+    g_cursorOv.lastCur = nullptr;
+}
+
+static void CursorFreeImage()
+{
+    if (g_cursorOv.memDc)
+    {
+        if (g_cursorOv.oldBmp)
+            SelectObject(g_cursorOv.memDc, g_cursorOv.oldBmp);
+        DeleteDC(g_cursorOv.memDc);
+    }
+    if (g_cursorOv.dib)
+        DeleteObject(g_cursorOv.dib);
+    g_cursorOv.memDc = nullptr;
+    g_cursorOv.dib = nullptr;
+    g_cursorOv.oldBmp = nullptr;
+    g_cursorOv.bits = nullptr;
+    g_cursorOv.w = g_cursorOv.h = 0;
+}
+
+static HBITMAP CursorMakeDib(int w, int h, void** bits)
+{
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    return CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, bits, nullptr, 0);
+}
+
+// Renders the cursor into a premultiplied-alpha bitmap (drawn on black and on white to recover the alpha). False if empty.
+static bool CursorSetImage(HCURSOR cur)
+{
+    ICONINFO ii{};
+    if (!cur || !GetIconInfo(cur, &ii))
+        return false;
+    BITMAP bm{};
+    HBITMAP ref = ii.hbmColor ? ii.hbmColor : ii.hbmMask;
+    GetObject(ref, sizeof(bm), &bm);
+    const int w = bm.bmWidth;
+    const int h = ii.hbmColor ? bm.bmHeight : bm.bmHeight / 2;
+    const int hx = static_cast<int>(ii.xHotspot);
+    const int hy = static_cast<int>(ii.yHotspot);
+    if (ii.hbmColor)
+        DeleteObject(ii.hbmColor);
+    if (ii.hbmMask)
+        DeleteObject(ii.hbmMask);
+    if (w <= 0 || h <= 0 || w > 512 || h > 512)
+        return false;
+
+    void* blackBits = nullptr;
+    void* whiteBits = nullptr;
+    HBITMAP blackDib = CursorMakeDib(w, h, &blackBits);
+    HBITMAP whiteDib = CursorMakeDib(w, h, &whiteBits);
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!blackDib || !whiteDib || !dc)
+    {
+        if (blackDib)
+            DeleteObject(blackDib);
+        if (whiteDib)
+            DeleteObject(whiteDib);
+        if (dc)
+            DeleteDC(dc);
+        return false;
+    }
+    const size_t n = static_cast<size_t>(w) * h;
+    memset(blackBits, 0, n * 4);
+    memset(whiteBits, 0xFF, n * 4);
+    HGDIOBJ old = SelectObject(dc, blackDib);
+    DrawIconEx(dc, 0, 0, cur, w, h, 0, nullptr, DI_NORMAL);
+    SelectObject(dc, whiteDib);
+    DrawIconEx(dc, 0, 0, cur, w, h, 0, nullptr, DI_NORMAL);
+    SelectObject(dc, old);
+    DeleteDC(dc);
+
+    CursorFreeImage();
+    g_cursorOv.dib = CursorMakeDib(w, h, &g_cursorOv.bits);
+    g_cursorOv.memDc = CreateCompatibleDC(nullptr);
+    if (!g_cursorOv.dib || !g_cursorOv.memDc)
+    {
+        DeleteObject(blackDib);
+        DeleteObject(whiteDib);
+        CursorFreeImage();
+        return false;
+    }
+    g_cursorOv.oldBmp = SelectObject(g_cursorOv.memDc, g_cursorOv.dib);
+    g_cursorOv.w = w;
+    g_cursorOv.h = h;
+    g_cursorOv.hotX = hx;
+    g_cursorOv.hotY = hy;
+
+    const BYTE* bp = static_cast<const BYTE*>(blackBits);
+    const BYTE* wp = static_cast<const BYTE*>(whiteBits);
+    BYTE* out = static_cast<BYTE*>(g_cursorOv.bits);
+    bool any = false;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const int diff = ((wp[i * 4] - bp[i * 4]) + (wp[i * 4 + 1] - bp[i * 4 + 1]) + (wp[i * 4 + 2] - bp[i * 4 + 2])) / 3;
+        const int a = std::clamp(255 - diff, 0, 255);
+        out[i * 4 + 0] = static_cast<BYTE>(std::min<int>(bp[i * 4 + 0], a));
+        out[i * 4 + 1] = static_cast<BYTE>(std::min<int>(bp[i * 4 + 1], a));
+        out[i * 4 + 2] = static_cast<BYTE>(std::min<int>(bp[i * 4 + 2], a));
+        out[i * 4 + 3] = static_cast<BYTE>(a);
+        any = any || a != 0;
+    }
+    DeleteObject(blackDib);
+    DeleteObject(whiteDib);
+    return any;
+}
+
+static void CursorWindowHide()
+{
+    if (g_cursorOv.wnd && IsWindowVisible(g_cursorOv.wnd))
+        ShowWindow(g_cursorOv.wnd, SW_HIDE);
+}
+
+static void CursorWindowDestroy()
+{
+    if (g_cursorOv.wnd)
+    {
+        DestroyWindow(g_cursorOv.wnd);
+        g_cursorOv.wnd = nullptr;
+    }
+    CursorFreeImage();
+}
+
+// Draws the pointer at the position the user sees. 'owner' is the overlay: an owned window always stays above it.
+static void CursorWindowUpdate(HINSTANCE inst, HWND owner, HCURSOR cur, double x, double y)
+{
+    if (!g_cursorOv.wnd)
+    {
+        if (!g_cursorOv.classRegistered)
+        {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = DefWindowProcW;
+            wc.hInstance = inst;
+            wc.lpszClassName = L"OptiCaptureCursor";
+            RegisterClassExW(&wc);
+            g_cursorOv.classRegistered = true;
+        }
+        g_cursorOv.wnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, L"OptiCaptureCursor",
+                                         L"", WS_POPUP, 0, 0, 1, 1, owner, nullptr, inst, nullptr);
+        if (!g_cursorOv.wnd)
+            return;
+    }
+
+    if (cur != g_cursorOv.lastCur || !g_cursorOv.memDc)
+    {
+        g_cursorOv.lastCur = cur;
+        HCURSOR use = cur;
+        if (HCURSOR o = OriginalForBlank(cur))
+            use = o;
+        if (!CursorSetImage(use))
+        {
+            // nothing to draw (blank / stale handle): the plain arrow
+            HCURSOR arrow = g_cursorOv.orig[0] ? g_cursorOv.orig[0] : LoadCursorW(nullptr, IDC_ARROW);
+            if (!CursorSetImage(arrow))
+                return;
+        }
+    }
+    if (!g_cursorOv.memDc)
+        return;
+
+    POINT pos{ static_cast<LONG>(std::lround(x)) - g_cursorOv.hotX, static_cast<LONG>(std::lround(y)) - g_cursorOv.hotY };
+    SIZE sz{ g_cursorOv.w, g_cursorOv.h };
+    POINT src{ 0, 0 };
+    BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(g_cursorOv.wnd, nullptr, &pos, &sz, g_cursorOv.memDc, &src, 0, &bf, ULW_ALPHA);
+    if (!IsWindowVisible(g_cursorOv.wnd))
+        ShowWindow(g_cursorOv.wnd, SW_SHOWNOACTIVATE);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -2897,7 +3184,11 @@ void Host::EnforceOverlayStyle()
 void Host::ReleaseOutputScalingMouse()
 {
     g_mouseRemap.active.store(false, std::memory_order_release);
+    g_mouseRemap.remap.store(false, std::memory_order_release);
+    g_mouseRemap.virtInit = false;
     g_mouseRemap.lastUnlockTick = 0;
+    CursorWindowHide();
+    RestoreSystemCursors();
     ClipCursor(nullptr);
     cursorClippedByUs_ = false;
 }
@@ -2940,6 +3231,29 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
     g_mouseRemap.outW = outW_;
     g_mouseRemap.outH = outH_;
     g_mouseRemap.active.store(true, std::memory_order_release);
+
+    // Pointer remap. Only while the game shows its pointer: with a hidden pointer (camera control) the game recentres it
+    // itself and uses relative movement, which needs no remapping.
+    CURSORINFO ci{};
+    ci.cbSize = sizeof(ci);
+    const bool pointerShown = GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && ci.hCursor;
+    if (pointerShown)
+    {
+        POINT cur{};
+        GetCursorPos(&cur);
+        if (!g_mouseRemap.virtInit || cur.x != g_mouseRemap.lastSet.x || cur.y != g_mouseRemap.lastSet.y)
+            MapGameToVirtual(g_mouseRemap, cur); // first time, or the game moved the cursor itself
+        BlankSystemCursors(inst_);
+        g_mouseRemap.remap.store(true, std::memory_order_release);
+        CursorWindowUpdate(inst_, overlay_, ci.hCursor, g_mouseRemap.virtX, g_mouseRemap.virtY);
+    }
+    else
+    {
+        g_mouseRemap.remap.store(false, std::memory_order_release);
+        g_mouseRemap.virtInit = false;
+        CursorWindowHide();
+        RestoreSystemCursors();
+    }
 
     // Re-unlock cursor periodically whenever the game clips/locks it to a smaller rectangle
     const ULONGLONG nowTick = GetTickCount64();
@@ -3149,6 +3463,7 @@ void Host::PublishLive(std::chrono::steady_clock::time_point now)
 void Host::Shutdown()
 {
     ReleaseOutputScalingMouse();
+    CursorWindowDestroy();
     if (g_mouseRemap.hook)
     {
         UnhookWindowsHookEx(g_mouseRemap.hook);
