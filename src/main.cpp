@@ -1550,10 +1550,14 @@ void Host::UpdateLabel()
     if (!label_)
         return;
     // labelAlways_ is forced true - window never destroyed.
-    // After timeout, make it invisible (alpha 0) but keep window alive for DWM stability
+    // After timeout, keep window VISIBLE (alpha 215) for DWM stability,
+    // but make text empty so it's not visible to user.
     if (std::chrono::steady_clock::now() > labelUntil_)
     {
-        SetLayeredWindowAttributes(label_, 0, 0, LWA_ALPHA);
+        SetWindowTextW(label_, L"");
+        InvalidateRect(label_, nullptr, TRUE);
+        // Keep alpha at 215 so DWM continues composing it identically
+        SetLayeredWindowAttributes(label_, 0, 215, LWA_ALPHA);
     }
     // stay above the overlay
     SetWindowPos(label_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
