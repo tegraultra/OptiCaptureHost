@@ -2879,6 +2879,80 @@ LRESULT App::OnCaptureKey(UINT vk)
     return 0;
 }
 
+bool IsGameStillRunning(HWND gameHwnd, const std::wstring& exeName)
+{
+    if (gameHwnd && IsWindow(gameHwnd))
+        return true;
+    if (!exeName.empty() && IsProcessRunningByExe(exeName))
+        return true;
+    return false;
+}
+
+bool CloseGameCompletely(HWND gameHwnd, const std::wstring& exeName)
+{
+    DWORD wndPid = 0;
+    if (gameHwnd && IsWindow(gameHwnd))
+    {
+        GetWindowThreadProcessId(gameHwnd, &wndPid);
+        PostMessageW(gameHwnd, WM_CLOSE, 0, 0);
+    }
+
+    const ULONGLONG graceStart = GetTickCount64();
+    while (GetTickCount64() - graceStart < 2500)
+    {
+        if (!IsGameStillRunning(gameHwnd, exeName))
+            return true;
+        Sleep(100);
+    }
+
+    if (wndPid != 0 && wndPid != GetCurrentProcessId())
+    {
+        if (HANDLE pw = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, wndPid))
+        {
+            TerminateProcess(pw, 0);
+            WaitForSingleObject(pw, 3000);
+            CloseHandle(pw);
+        }
+    }
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap != INVALID_HANDLE_VALUE)
+    {
+        PROCESSENTRY32W pe{};
+        pe.dwSize = sizeof(pe);
+        if (Process32FirstW(snap, &pe))
+        {
+            do
+            {
+                if (pe.th32ProcessID == GetCurrentProcessId())
+                    continue;
+                if (!_wcsicmp(pe.szExeFile, L"OptiCaptureLauncher.exe") || !_wcsicmp(pe.szExeFile, L"OptiCaptureHost.exe"))
+                    continue;
+                if (!exeName.empty() && _wcsicmp(pe.szExeFile, exeName.c_str()) == 0)
+                {
+                    if (HANDLE p = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pe.th32ProcessID))
+                    {
+                        TerminateProcess(p, 0);
+                        WaitForSingleObject(p, 3000);
+                        CloseHandle(p);
+                    }
+                }
+            } while (Process32NextW(snap, &pe));
+        }
+        CloseHandle(snap);
+    }
+
+    const ULONGLONG settleStart = GetTickCount64();
+    while (GetTickCount64() - settleStart < 2000)
+    {
+        if (!IsGameStillRunning(gameHwnd, exeName))
+            break;
+        Sleep(100);
+    }
+    Sleep(250);
+    return !IsGameStillRunning(gameHwnd, exeName);
+}
+
 void App::InstallReshadeForSelectedGame()
 {
     if (selected_ < 0 || selected_ >= static_cast<int>(games_.size()))
@@ -2886,7 +2960,7 @@ void App::InstallReshadeForSelectedGame()
         SetNote(L"Pick a game from the list first.", Note::Error);
         return;
     }
-    const GameItem& game = games_[selected_];
+    const GameItem game = games_[selected_];
     if (game.fullExe.empty())
     {
         SetNote(L"Could not read the game's executable path (protected process).", Note::Error);
@@ -2906,33 +2980,84 @@ void App::InstallReshadeForSelectedGame()
     if (srcAttr == INVALID_FILE_ATTRIBUTES || !(srcAttr & FILE_ATTRIBUTE_DIRECTORY))
     {
         CreateDirectoryW(bundleDir.c_str(), nullptr);
-        SetNote(std::wstring(L"Created \"") + kReshadeBundleDir + L"\" next to the launcher. Put your ReShade files inside it and click Install again.", Note::Error);
+        SetNote(std::wstring(L"Created \"") + kReshadeBundleDir + L"\" next to the launcher. Put the required files inside it and click Install again.", Note::Error);
         return;
     }
 
-    const bool gameRunning = IsProcessRunningByExe(game.exe);
+    WIN32_FIND_DATAW fd{};
+    HANDLE hf = FindFirstFileW((bundleDir + L"\\*").c_str(), &fd);
+    bool hasAny = false;
+    if (hf != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0)
+            {
+                hasAny = true;
+                break;
+            }
+        } while (FindNextFileW(hf, &fd));
+        FindClose(hf);
+    }
+    if (!hasAny)
+    {
+        SetNote(std::wstring(L"Folder \"") + kReshadeBundleDir + L"\" is empty. Put the required files inside it first.", Note::Error);
+        return;
+    }
+
+    KillTimer(hwnd_, kTimerList);
+    const bool wasRunning = IsGameStillRunning(game.hwnd, game.exe);
+    bool closedOk = true;
+    if (wasRunning)
+    {
+        SetNote(L"Closing " + game.exe + L" completely before copying ReShade files...", Note::Info);
+        UpdateWindow(hwnd_);
+        closedOk = CloseGameCompletely(game.hwnd, game.exe);
+    }
+
     int copied = 0, failed = 0;
     CopyTree(bundleDir, gameDir, copied, failed);
 
-    if (copied == 0 && failed == 0)
+    bool relaunched = false;
+    if (wasRunning && closedOk)
     {
-        SetNote(std::wstring(L"Folder \"") + kReshadeBundleDir + L"\" is empty. Put ready ReShade files inside it first.", Note::Error);
-        return;
+        SHELLEXECUTEINFOW sei{};
+        sei.cbSize = sizeof(sei);
+        sei.lpVerb = L"open";
+        sei.lpFile = game.fullExe.c_str();
+        sei.lpDirectory = gameDir.c_str();
+        sei.nShow = SW_SHOWNORMAL;
+        relaunched = ShellExecuteExW(&sei) != FALSE;
     }
 
-    std::wstring msg = L"Copied " + std::to_wstring(copied) + L" file(s) next to the game executable:\n" + gameDir + L"\n\n" +
-                       L"IMPORTANT:\n"
-                       L"1. You MUST restart the game (close it completely and launch it again) for ReShade to load.\n"
-                       L"2. Run the game in Borderless Fullscreen or Windowed mode.\n"
-                       L"3. Open the ReShade menu in-game and enable OptiCaptureDepth if you use ReShade depth.\n"
-                       L"4. Single-player games only (anti-cheat systems may block ReShade online).";
+    SetTimer(hwnd_, kTimerList, 3000, nullptr);
+    Refresh();
+    if (hwnd_ && IsWindow(hwnd_))
+    {
+        ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+        DockPanel();
+    }
+
+    std::wstring msg = L"Copied " + std::to_wstring(copied) + L" required file(s) to:\n" + gameDir + L"\n\n" +
+                       L"Notes:\n"
+                       L"1. Install ReShade (with Add-on support) on the game first; this button copies only the required files.\n"
+                       L"2. Works on Direct3D 11 / 12 (GPU) and Direct3D 9 / 10 / OpenGL / Vulkan (CPU).\n"
+                       L"3. In-game, open the ReShade menu and tick OptiCaptureDepth on (single-player games only).";
+    if (wasRunning)
+    {
+        if (relaunched)
+            msg += L"\n\n" + game.exe + L" was closed and launched again from its executable.";
+        else if (!closedOk)
+            msg += L"\n\nWarning: " + game.exe + L" was still running; close it and launch it again.";
+        else
+            msg += L"\n\n" + game.exe + L" was closed; please launch it again.";
+    }
     if (failed > 0)
-        msg += L"\n\nWarning: " + std::to_wstring(failed) + L" file(s) could not be replaced because they are in use. Close the game and click Install again.";
-    else if (gameRunning)
-        msg += L"\n\nNote: " + game.exe + L" is currently running — close and reopen it now.";
+        msg += L"\n\nWarning: " + std::to_wstring(failed) + L" file(s) could not be copied.";
 
     MessageBoxW(hwnd_, msg.c_str(), L"ReShade Installation", MB_OK | (failed > 0 ? MB_ICONWARNING : MB_ICONINFORMATION));
-    SetNote(L"ReShade installed next to " + game.exe + L". Restart the game to apply.", failed > 0 ? Note::Error : Note::Ok);
+    SetNote(L"Copied " + std::to_wstring(copied) + L" file(s) to " + game.exe + (relaunched ? L" and restarted the game." : L"."),
+            failed > 0 ? Note::Error : Note::Ok);
 }
 
 void App::OnClick(int id)
@@ -3678,7 +3803,7 @@ namespace
 {
 constexpr float kPanelW = 270.0f; // logical units, like the main window (see S / R)
 constexpr float kPanelHHave = 446.0f;    // dll found: shorter
-constexpr float kPanelHDepth = 730.0f;   // the Depth window
+constexpr float kPanelHDepth = 845.0f;   // the Depth window
 constexpr float kPanelHMissing = 556.0f; // dll missing: warning, download button and a hint more
 constexpr float kPanelDrop = 90.0f; // how far below the top of the main window the DLSS 5 window starts
 } // namespace
@@ -3843,21 +3968,21 @@ void App::DrawDepthPanel(gp::Graphics& g)
         Text(g, detail, *f_.sm, R(30, 292, 216, 38), col::Muted(), 0, true);
     }
 
-    Text(g, L"How to use", *f_.bodyB, R(18, 346, 234, 22), col::Text());
+    Text(g, L"How to use", *f_.bodyB, R(18, 342, 234, 22), col::Text());
     {
-        const gp::RectF box = R(18, 372, 234, 296);
+        const gp::RectF box = R(18, 368, 234, 356);
         FillRound(g, box, S(10), col::Alpha(col::Accent(), 24));
         StrokeRound(g, box, S(10), col::Alpha(col::Accent(), 90), max(1.0f, S(1)));
         Text(g,
-             L"1. First, install ReShade (with Add-on support) onto your game.\n"
-             L"2. Select your game and press \"Install ReShade files\" below: it closes the game, copies only the required files from \"ReShade depth\" next to the game exe, and restarts it.\n"
+             L"1. Install ReShade (with Add-on support) onto your game first.\n"
+             L"2. Click \"Install ReShade files\" below: it closes the game completely, copies only the required files from \"ReShade depth\" next to the game exe, and launches the game again.\n"
              L"3. Tick OptiCaptureDepth on in ReShade's menu.\n"
              L"4. Supports DX11/DX12 (GPU) and DX9/DX10/OpenGL/Vulkan (CPU). Single-player only.",
-             *f_.sm, R(28, 380, 216, 280), col::Text(), 0, true);
+             *f_.sm, R(28, 376, 216, 340), col::Text(), 0, true);
     }
     {
         const bool pick = selected_ >= 0 && selected_ < static_cast<int>(games_.size()) && !Running();
-        const gp::RectF instBtn = R(18, 678, 234, 34);
+        const gp::RectF instBtn = R(18, 734, 234, 38);
         const bool hotI = hover_ == kIdDepthInstall && pick;
         if (pick)
             FillRound(g, instBtn, S(9), hotI ? col::Accent2() : col::Accent());
@@ -3869,7 +3994,7 @@ void App::DrawDepthPanel(gp::Graphics& g)
             AddHit(instBtn, kIdDepthInstall);
     }
     {
-        const gp::RectF btn = R(18, 720, 234, 32);
+        const gp::RectF btn = R(18, 782, 234, 38);
         const bool hot = hover_ == kIdDepthFolder;
         FillRound(g, btn, S(9), hot ? col::RowHot() : col::Row());
         StrokeRound(g, btn, S(9), hot ? col::Accent2() : col::Line(), max(1.0f, S(1)));
