@@ -271,8 +271,10 @@ static POINT MapVirtualToGame(const MouseRemapState& m)
     POINT p;
     p.x = m.gameClientScreen.left + static_cast<LONG>(std::floor((m.virtX - m.overlayScreen.left) * fx));
     p.y = m.gameClientScreen.top + static_cast<LONG>(std::floor((m.virtY - m.overlayScreen.top) * fy));
-    p.x = std::clamp<LONG>(p.x, m.gameClientScreen.left, m.gameClientScreen.right - 1);
-    p.y = std::clamp<LONG>(p.y, m.gameClientScreen.top, m.gameClientScreen.bottom - 1);
+    // Add 2-pixel margin from edges to avoid ClipCursor issues when clicking at boundaries
+    const LONG margin = 2;
+    p.x = std::clamp<LONG>(p.x, m.gameClientScreen.left + margin, m.gameClientScreen.right - 1 - margin);
+    p.y = std::clamp<LONG>(p.y, m.gameClientScreen.top + margin, m.gameClientScreen.bottom - 1 - margin);
     return p;
 }
 
