@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # NVIDIA's DLSS SDK (headers + static library), from NVIDIA's own public repository, pinned to one commit.
+      # NVIDIA's DLSS SDK (headers + static library), from NVIDIA's own public repository, pinned to the release tag v6.8.0.
       # If this step fails the host is built without DLSS (the host's log then says so).
       - name: Fetch NVIDIA DLSS SDK
         shell: pwsh
@@ -49,17 +49,14 @@ jobs:
             exit 1
           }
 
-      # ReShade's public add-on headers (BSD-3-Clause), pinned to one commit. Only used for the optional depth add-on; if this fails
+      # ReShade's public add-on headers (BSD-3-Clause), pinned to the release tag v6.8.0. Only used for the optional depth add-on; if this fails
       # the add-on is simply not built and everything else is unaffected.
       - name: Fetch ReShade add-on headers
         shell: pwsh
         continue-on-error: true
         run: |
-          $c = 'dcf9d0d3df92daa52b31619b3f660f2f04a5d1e6'
-          git init reshade_src
-          git -C reshade_src remote add origin https://github.com/crosire/reshade.git
-          git -C reshade_src fetch --depth 1 origin $c
-          git -C reshade_src checkout FETCH_HEAD
+          git clone --depth 1 --branch v6.8.0 https://github.com/crosire/reshade.git reshade_src
+          if ($LASTEXITCODE -ne 0) { throw 'could not download the ReShade headers' }
           New-Item -ItemType Directory -Force third_party/reshade/include | Out-Null
           Copy-Item reshade_src/include/*.hpp third_party/reshade/include/
           Copy-Item reshade_src/LICENSE.md third_party/reshade/LICENSE.md
