@@ -293,6 +293,13 @@ static void MapGameToVirtual(MouseRemapState& m, POINT cur)
 
 LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
+    // Fastest possible path: if remap is off (mouse look / button held), pass through immediately.
+    // No system calls, no locks, no atomics beyond one load.
+    if (nCode == HC_ACTION && g_mouseRemap.active.load(std::memory_order_relaxed) &&
+        !g_mouseRemap.remap.load(std::memory_order_relaxed))
+    {
+        return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
+    }
     if (nCode == HC_ACTION && g_mouseRemap.active.load(std::memory_order_acquire))
     {
         auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
@@ -300,7 +307,12 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_MBUTTONDOWN)
             g_mouseRemap.remap.store(false, std::memory_order_release);
         if (ms && !(ms->flags & LLMHF_INJECTED) && wParam == WM_MOUSEMOVE && !g_mouseRemap.remap.load(std::memory_order_acquire))
-            g_mouseRemap.freeMoveTick.store(GetTickCount64(), std::memory_order_release);
+        {
+            // Rate-limit freeMoveTick updates to avoid 1000 Hz atomic writes
+            const ULONGLONG now = GetTickCount64();
+            if (now - g_mouseRemap.freeMoveTick.load(std::memory_order_relaxed) >= 8)
+                g_mouseRemap.freeMoveTick.store(now, std::memory_order_relaxed);
+        }
         if (ms && !(ms->flags & LLMHF_INJECTED) && wParam == WM_MOUSEMOVE && g_mouseRemap.remap.load(std::memory_order_acquire) &&
             g_mouseRemap.virtInit)
         {
@@ -3222,16 +3234,18 @@ void Host::MoveOverlay()
         lastBounds_ = {};
     }
 
+    const bool inMouseLook = GetTickCount64() < g_mouseRemap.lookUntil;
     if (r.left != lastBounds_.left || r.top != lastBounds_.top || r.right != lastBounds_.right || r.bottom != lastBounds_.bottom)
     {
         lastBounds_ = r;
         SetWindowPos(overlay_, HWND_TOPMOST, ovX, ovY, static_cast<int>(outW_), static_cast<int>(outH_), SWP_NOACTIVATE);
     }
-    else
+    else if (!inMouseLook)
     {
         // Keep the overlay above a game that re-asserts its own topmost state (but not above the launcher window).
         // Only when some other window actually got above the overlay: re-ordering the topmost windows every 250 ms
         // while the game is running makes DWM redo its composition and costs the game frames.
+        // Skip entirely during mouse look (camera rotation) to avoid frame drops.
         if (!LauncherInFront() && GetWindow(overlay_, GW_HWNDPREV) != nullptr)
             SetWindowPos(overlay_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
@@ -3251,6 +3265,9 @@ void Host::EnforceOverlayStyle()
 
     const LONG_PTR have = GetWindowLongPtrW(overlay_, GWL_EXSTYLE);
     if ((have & mask) == want)
+        return;
+    // Skip style enforcement during mouse look to avoid DWM re-composition
+    if (GetTickCount64() < g_mouseRemap.lookUntil)
         return;
 
     Log("Overlay style was changed from outside (0x%08lX), restoring it", static_cast<unsigned long>(have));
@@ -3322,6 +3339,31 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
     CURSORINFO ci{};
     ci.cbSize = sizeof(ci);
     const bool pointerShown = GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && ci.hCursor;
+
+    // During mouse look (hidden cursor): skip all heavy per-frame work to avoid frame drops.
+    if (!pointerShown)
+    {
+        g_mouseRemap.remap.store(false, std::memory_order_release);
+        // Extend lookUntil to keep fast path active
+        g_mouseRemap.lookUntil = GetTickCount64() + 2000;
+        // Only ClipCursor unlock, every 100 ms
+        const ULONGLONG nowTick = GetTickCount64();
+        if (nowTick - g_mouseRemap.lastUnlockTick >= 100)
+        {
+            g_mouseRemap.lastUnlockTick = nowTick;
+            RECT curClip{};
+            if (GetClipCursor(&curClip))
+            {
+                const int clipW = curClip.right - curClip.left;
+                const int clipH = curClip.bottom - curClip.top;
+                const int ovW = g_mouseRemap.overlayScreen.right - g_mouseRemap.overlayScreen.left;
+                const int ovH = g_mouseRemap.overlayScreen.bottom - g_mouseRemap.overlayScreen.top;
+                if (clipW > 0 && clipH > 0 && (clipW < ovW - 8 || clipH < ovH - 8))
+                    ClipCursor(nullptr);
+            }
+        }
+        return;
+    }
     if (pointerShown)
     {
         POINT cur{};
@@ -3353,30 +3395,6 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
             g_mouseRemap.lookUntil = t + 1000;
         g_mouseRemap.hiddenSince = 0;
         const bool look = t < g_mouseRemap.lookUntil;
-        // During mouse look (camera rotation) the cursor is hidden: skip all heavy per-frame work
-        // (GDI cursor ops, system calls, MapGameToVirtual) to avoid frame drops on the render thread.
-        if (look)
-        {
-            // Extend lookUntil so continuous camera rotation keeps the fast path active
-            g_mouseRemap.lookUntil = t + 1000;
-            g_mouseRemap.remap.store(false, std::memory_order_release);
-            // Only ClipCursor unlock, and only every 100 ms
-            if (t - g_mouseRemap.lastUnlockTick >= 100)
-            {
-                g_mouseRemap.lastUnlockTick = t;
-                RECT curClip{};
-                if (GetClipCursor(&curClip))
-                {
-                    const int clipW = curClip.right - curClip.left;
-                    const int clipH = curClip.bottom - curClip.top;
-                    const int ovW = g_mouseRemap.overlayScreen.right - g_mouseRemap.overlayScreen.left;
-                    const int ovH = g_mouseRemap.overlayScreen.bottom - g_mouseRemap.overlayScreen.top;
-                    if (clipW > 0 && clipH > 0 && (clipW < ovW - 8 || clipH < ovH - 8))
-                        ClipCursor(nullptr);
-                }
-            }
-            return;
-        }
         // Held button or mouse look: the real cursor is the truth, the drawn pointer just follows it.
         if (btnDown || look || warped || !init)
             MapGameToVirtual(g_mouseRemap, cur);
@@ -3386,18 +3404,12 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
             vx = g_mouseRemap.virtX;
             vy = g_mouseRemap.virtY;
         }
+        BlankSystemCursors(inst_);
         g_mouseRemap.remap.store(!btnDown && !look, std::memory_order_release);
         if (look)
-        {
-            // During mouse look the cursor is hidden: skip BlankSystemCursors (already done)
-            // and CursorWindowUpdate (nothing to draw). Just hide the cursor window.
             CursorWindowHide();
-        }
         else
-        {
-            BlankSystemCursors(inst_);
             CursorWindowUpdate(inst_, overlay_, ci.hCursor, vx, vy);
-        }
     }
     else
     {
@@ -3417,8 +3429,7 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
 
     // Re-unlock cursor periodically whenever the game clips/locks it to a smaller rectangle
     const ULONGLONG nowTick = GetTickCount64();
-    const ULONGLONG unlockInterval = (GetTickCount64() < g_mouseRemap.lookUntil) ? 100 : 25;
-    if (nowTick - g_mouseRemap.lastUnlockTick >= unlockInterval)
+    if (nowTick - g_mouseRemap.lastUnlockTick >= 25)
     {
         g_mouseRemap.lastUnlockTick = nowTick;
         RECT curClip{};
