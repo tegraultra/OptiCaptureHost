@@ -217,12 +217,13 @@ void BoostProcess(int level)
 
 // ---------------------------------------------------------------------------------------------------------------
 // ---------------------------------------------------------------------------------------------------------------
-// Output-scaling mouse remapping & anti-ClipCursor re-lock
+// Output-scaling mouse click mapping & ClipCursor unlock
 // ---------------------------------------------------------------------------------------------------------------
-// When output scaling is active, the game window is smaller (gameW x gameH) while the overlay stretches the picture
-// across the output area (outW x outH). Many games call ClipCursor() to trap the cursor inside their small client rect
-// or re-apply it when focus returns. We check GetClipCursor() and call ClipCursor(nullptr) whenever the game clips
-// it to a smaller rectangle while focused (outside interactive/menu mode), and remap movement + clicks proportionally.
+// When output scaling downscales the game window (gameW x gameH) and stretches it across the full monitor
+// (outW x outH) on the overlay, games may clip ClipCursor() to their small window and receive clicks at
+// unscaled coordinates. We keep ClipCursor(nullptr) enforced while the game is focused (outside interactive mode)
+// and map button press/release coordinates proportionally into the game's smaller client rect without swallowing
+// WM_MOUSEMOVE.
 struct MouseRemapState
 {
     std::atomic<bool> active{ false };
@@ -234,47 +235,16 @@ struct MouseRemapState
     UINT gameH = 0;
     UINT outW = 0;
     UINT outH = 0;
-    bool virtInit = false;
-    double virtX = 0.0;
-    double virtY = 0.0;
-    POINT lastPhys{};
-    bool hasLastPhys = false;
-    int recenterCount = 0;
-    ULONGLONG recenterWindowStart = 0;
-    std::atomic<ULONGLONG> lastGameClipUnlockTick{ 0 };
+    ULONGLONG lastUnlockTick = 0;
 };
 
 MouseRemapState g_mouseRemap;
 
-static bool IsRemappedMouseButtonEvent(WPARAM msg)
+static bool IsClickRemapMessage(WPARAM msg)
 {
     return msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
            msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
            msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP;
-}
-
-static void MapScreenPointToGame(POINT screenPt, LONG& outGameX, LONG& outGameY)
-{
-    const RECT gr = g_mouseRemap.gameClientScreen;
-    const RECT ov = g_mouseRemap.overlayScreen;
-    const UINT gw = g_mouseRemap.gameW;
-    const UINT gh = g_mouseRemap.gameH;
-    const UINT ow = g_mouseRemap.outW;
-    const UINT oh = g_mouseRemap.outH;
-
-    const double normX = (ow > 1)
-        ? std::clamp((static_cast<double>(screenPt.x) - static_cast<double>(ov.left)) / static_cast<double>(ow - 1), 0.0, 1.0)
-        : 0.0;
-    const double normY = (oh > 1)
-        ? std::clamp((static_cast<double>(screenPt.y) - static_cast<double>(ov.top)) / static_cast<double>(oh - 1), 0.0, 1.0)
-        : 0.0;
-
-    g_mouseRemap.virtX = normX * static_cast<double>(ow > 0 ? ow - 1 : 0);
-    g_mouseRemap.virtY = normY * static_cast<double>(oh > 0 ? oh - 1 : 0);
-    g_mouseRemap.virtInit = true;
-
-    outGameX = gr.left + ((gw > 1) ? static_cast<LONG>(std::lround(normX * static_cast<double>(gw - 1))) : 0L);
-    outGameY = gr.top  + ((gh > 1) ? static_cast<LONG>(std::lround(normY * static_cast<double>(gh - 1))) : 0L);
 }
 
 LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
@@ -290,78 +260,26 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
                 return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
             }
 
-            const RECT gr = g_mouseRemap.gameClientScreen;
-            const UINT gw = g_mouseRemap.gameW;
-            const UINT gh = g_mouseRemap.gameH;
-            const UINT ow = g_mouseRemap.outW;
-            const UINT oh = g_mouseRemap.outH;
-
-            if (gw > 1 && gh > 1 && ow > gw && oh > gh)
+            if (IsClickRemapMessage(wParam))
             {
-                if (wParam == WM_MOUSEMOVE)
+                const RECT gr = g_mouseRemap.gameClientScreen;
+                const RECT ov = g_mouseRemap.overlayScreen;
+                const UINT gw = g_mouseRemap.gameW;
+                const UINT gh = g_mouseRemap.gameH;
+                const UINT ow = g_mouseRemap.outW;
+                const UINT oh = g_mouseRemap.outH;
+
+                if (gw > 1 && gh > 1 && ow > gw && oh > gh)
                 {
-                    const LONG centerX = gr.left + static_cast<LONG>(gw / 2);
-                    const LONG centerY = gr.top + static_cast<LONG>(gh / 2);
+                    const double normX = std::clamp(
+                        (static_cast<double>(ms->pt.x) - static_cast<double>(ov.left)) / static_cast<double>(ow - 1),
+                        0.0, 1.0);
+                    const double normY = std::clamp(
+                        (static_cast<double>(ms->pt.y) - static_cast<double>(ov.top)) / static_cast<double>(oh - 1),
+                        0.0, 1.0);
 
-                    const ULONGLONG nowTick = GetTickCount64();
-                    if (nowTick - g_mouseRemap.recenterWindowStart > 500)
-                    {
-                        g_mouseRemap.recenterWindowStart = nowTick;
-                        g_mouseRemap.recenterCount = 0;
-                    }
-                    if (std::abs(ms->pt.x - centerX) <= 2 && std::abs(ms->pt.y - centerY) <= 2 && g_mouseRemap.hasLastPhys &&
-                        (std::abs(g_mouseRemap.lastPhys.x - centerX) > 4 || std::abs(g_mouseRemap.lastPhys.y - centerY) > 4))
-                    {
-                        ++g_mouseRemap.recenterCount;
-                        g_mouseRemap.lastPhys = ms->pt;
-                        g_mouseRemap.virtX = (ow - 1) * 0.5;
-                        g_mouseRemap.virtY = (oh - 1) * 0.5;
-                        return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
-                    }
-
-                    if (g_mouseRemap.recenterCount >= 3)
-                    {
-                        g_mouseRemap.lastPhys = ms->pt;
-                        return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
-                    }
-
-                    if (!g_mouseRemap.virtInit || !g_mouseRemap.hasLastPhys)
-                    {
-                        const double rx = std::clamp(static_cast<double>(ms->pt.x - gr.left) / static_cast<double>(gw - 1), 0.0, 1.0);
-                        const double ry = std::clamp(static_cast<double>(ms->pt.y - gr.top) / static_cast<double>(gh - 1), 0.0, 1.0);
-                        g_mouseRemap.virtX = rx * static_cast<double>(ow - 1);
-                        g_mouseRemap.virtY = ry * static_cast<double>(oh - 1);
-                        g_mouseRemap.virtInit = true;
-                        g_mouseRemap.lastPhys = ms->pt;
-                        g_mouseRemap.hasLastPhys = true;
-                    }
-                    else
-                    {
-                        const double dx = static_cast<double>(ms->pt.x - g_mouseRemap.lastPhys.x);
-                        const double dy = static_cast<double>(ms->pt.y - g_mouseRemap.lastPhys.y);
-
-                        g_mouseRemap.virtX = std::clamp(g_mouseRemap.virtX + dx, 0.0, static_cast<double>(ow - 1));
-                        g_mouseRemap.virtY = std::clamp(g_mouseRemap.virtY + dy, 0.0, static_cast<double>(oh - 1));
-
-                        const LONG targetX = gr.left + static_cast<LONG>(std::lround(g_mouseRemap.virtX * static_cast<double>(gw - 1) / static_cast<double>(ow - 1)));
-                        const LONG targetY = gr.top + static_cast<LONG>(std::lround(g_mouseRemap.virtY * static_cast<double>(gh - 1) / static_cast<double>(oh - 1)));
-
-                        g_mouseRemap.lastPhys = { targetX, targetY };
-                        if (targetX != ms->pt.x || targetY != ms->pt.y)
-                        {
-                            g_mouseRemap.selfMove.store(true, std::memory_order_release);
-                            SetCursorPos(targetX, targetY);
-                            return 1;
-                        }
-                    }
-                }
-                else if (IsRemappedMouseButtonEvent(wParam))
-                {
-                    LONG mappedX = ms->pt.x;
-                    LONG mappedY = ms->pt.y;
-                    MapScreenPointToGame(ms->pt, mappedX, mappedY);
-                    g_mouseRemap.lastPhys = { mappedX, mappedY };
-                    g_mouseRemap.hasLastPhys = true;
+                    const LONG mappedX = gr.left + static_cast<LONG>(std::lround(normX * static_cast<double>(gw - 1)));
+                    const LONG mappedY = gr.top  + static_cast<LONG>(std::lround(normY * static_cast<double>(gh - 1)));
 
                     if (mappedX != ms->pt.x || mappedY != ms->pt.y)
                     {
@@ -3004,8 +2922,7 @@ void Host::EnforceOverlayStyle()
 void Host::ReleaseOutputScalingMouse()
 {
     g_mouseRemap.active.store(false, std::memory_order_release);
-    g_mouseRemap.virtInit = false;
-    g_mouseRemap.hasLastPhys = false;
+    g_mouseRemap.lastUnlockTick = 0;
     ClipCursor(nullptr);
     cursorClippedByUs_ = false;
 }
@@ -3013,9 +2930,9 @@ void Host::ReleaseOutputScalingMouse()
 void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
 {
     (void)now;
-    const bool scaled = upOn_ && outW_ > width_ && outH_ > height_ && width_ > 1 && height_ > 1;
+    const bool downscaled = upOn_ && outW_ > width_ && outH_ > height_ && width_ > 1 && height_ > 1;
     const HWND fg = GetForegroundWindow();
-    const bool gameFocused = scaled && !interactive_ && target_ && IsWindow(target_) && !IsIconic(target_) &&
+    const bool gameFocused = downscaled && !interactive_ && target_ && IsWindow(target_) && !IsIconic(target_) &&
                              (fg == target_ || GetAncestor(fg, GA_ROOT) == target_);
 
     if (!gameFocused)
@@ -3049,18 +2966,20 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
     g_mouseRemap.outH = outH_;
     g_mouseRemap.active.store(true, std::memory_order_release);
 
-    // Re-unlock cursor whenever the game clips/locks it to a smaller rect (e.g. its small window on focus return)
-    RECT curClip{};
-    if (GetClipCursor(&curClip))
+    // Re-unlock cursor periodically whenever the game clips/locks it to a smaller rectangle
+    const ULONGLONG nowTick = GetTickCount64();
+    if (nowTick - g_mouseRemap.lastUnlockTick >= 25)
     {
-        const int clipW = curClip.right - curClip.left;
-        const int clipH = curClip.bottom - curClip.top;
-        const int ovW = g_mouseRemap.overlayScreen.right - g_mouseRemap.overlayScreen.left;
-        const int ovH = g_mouseRemap.overlayScreen.bottom - g_mouseRemap.overlayScreen.top;
-        if (clipW > 0 && clipH > 0 && (clipW < ovW - 8 || clipH < ovH - 8))
+        g_mouseRemap.lastUnlockTick = nowTick;
+        RECT curClip{};
+        if (GetClipCursor(&curClip))
         {
-            ClipCursor(nullptr);
-            g_mouseRemap.lastGameClipUnlockTick.store(GetTickCount64(), std::memory_order_release);
+            const int clipW = curClip.right - curClip.left;
+            const int clipH = curClip.bottom - curClip.top;
+            const int ovW = g_mouseRemap.overlayScreen.right - g_mouseRemap.overlayScreen.left;
+            const int ovH = g_mouseRemap.overlayScreen.bottom - g_mouseRemap.overlayScreen.top;
+            if (clipW > 0 && clipH > 0 && (clipW < ovW - 8 || clipH < ovH - 8))
+                ClipCursor(nullptr);
         }
     }
     cursorClippedByUs_ = false;
