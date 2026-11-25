@@ -111,6 +111,29 @@ with their licence texts in the `licenses` folder. Each keeps its own licence; s
 - **DittoSR**: [github.com/Vancete/DittoSR/releases](https://github.com/Vancete/DittoSR/releases), copy its files into the `DittoSR` folder.
 - **`nvngx_dlssnr.dll`** (DLSS 5 runtime), **optional**: it is needed only for DLSS 5, and everything else works without it. DLSS 5 needs **version 310.9.16** of this file. It is not distributed here; get it yourself from a source you trust and check that you may use it.
 
+## ReShade depth (GPU & CPU shared memory)
+
+By default, when the host's own temporal upscaler (**FSR 3/4** or **DLSS**) runs on a captured window, it uses a flat depth buffer so the game itself does not need any extra files or add-ons. When you enable **ReShade** in the **Depth** panel, `OptiCaptureDepth` reads the game's linearized depth (`OC_LinearDepth` from `OptiCaptureDepth.fx`) and shares it with `OptiCaptureHost.exe`:
+
+- **Direct3D 11 & Direct3D 12 (GPU path):** Creates a shared `R32_FLOAT` texture with an NT handle (`Local\OptiCaptureDepth_<PID>`) and copies it directly on the GPU into `fsrDepth_` via `OpenSharedHandle` and `CopyResource`.
+- **Direct3D 9, Direct3D 10, OpenGL & Vulkan (CPU path):** Because NT shared GPU texture handles are not available across these APIs into D3D12, the add-on copies the depth texture into a staging buffer (`memory_heap::gpu_to_cpu`), maps it on the CPU, and writes the float depth rows into a shared memory buffer (`Local\OptiCaptureDepthCpu_<PID>`). `OptiCaptureHost.exe` reads that buffer into a D3D12 upload buffer and uploads it to `fsrDepth_` via `CopyTextureRegion`.
+
+### How to install and use ReShade depth
+
+1. **Install ReShade with Add-on support first:** Download ReShade 6+ (**with add-on support**) from [reshade.me](https://reshade.me) and install it into your game. The launcher's install button copies only the required helper files — it does not install ReShade itself.
+2. **Prepare the `ReShade depth` folder:** Place your required files inside the `ReShade depth` folder next to `OptiCaptureLauncher.exe` (you can click **Open "ReShade depth" folder** in the **Depth** panel to create/open it). Typically this includes `OptiCaptureDepth.addon64`, `OptiCaptureDepth.fx` (under `reshade-shaders\Shaders\`), and any required `.ini` files.
+3. **Install into the selected game:** Select the running game in the launcher, open the **Depth** panel, and click **Install ReShade files**.
+   - The launcher **completely closes the selected game** first so files are not locked.
+   - It **copies only the required files** from `ReShade depth` next to the game's executable.
+   - It **launches the game again** from its executable while **keeping the launcher window open**.
+   - Once `OptiCapture.ini`, `OptiCaptureDepth.addon64`, and `reshade-shaders\Shaders\OptiCaptureDepth.fx` are present in the game folder, the install button turns **green** and displays **Installed**.
+4. **Enable in ReShade and start capture:**
+   - Open the ReShade overlay in-game (`Home` key), tick **OptiCaptureDepth** on, and verify depth detection with ReShade's **DisplayDepth** effect (adjusting reversed/logarithmic/flip depth settings if needed).
+   - In the launcher's **Depth** panel, choose **ReShade** (automatically sets output scaling to **DLSS · Quality**; choosing **Flat** sets output scaling to **Off**), ensure output scaling is **FSR 3/4** or **DLSS**, and press **START**.
+   - Watch the live status box in the **Depth** panel (`Receiving W×H`, `Different size`, `Cannot open it`, `No new pictures`, `Waiting for the add-on`).
+
+> **Important notes:** Use ReShade **only in single-player games** (anti-cheat systems in online games can flag or ban ReShade/add-ons). CPU depth transfer on D3D9/D3D10/OpenGL/Vulkan copies depth data every frame through system RAM and may add CPU/memory overhead at high resolutions. Depth is matched when its dimensions match the captured picture size (`width_ × height_`).
+
 ## Administrator rights and RTSS
 
 The launcher itself runs as a **normal program** (not as administrator), so the shortcuts of the games it starts keep working.
