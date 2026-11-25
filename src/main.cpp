@@ -217,23 +217,19 @@ void BoostProcess(int level)
 
 // ---------------------------------------------------------------------------------------------------------------
 // ---------------------------------------------------------------------------------------------------------------
-// Output-scaling mouse remapping & cursor confinement
+// Output-scaling mouse remapping & anti-ClipCursor re-lock
 // ---------------------------------------------------------------------------------------------------------------
-// When output scaling is active, the game renders in a smaller window (width_ x height_) while the overlay stretches
-// it across the full monitor (outW_ x outH_). Without remapping:
-//   1. Games that call ClipCursor() trap the cursor inside the small top-left box.
-//   2. Games that don't call ClipCursor() let clicks fall outside the small game window onto the desktop.
-//   3. Visual UI buttons on the stretched overlay don't match the unscaled game window coordinates.
-// Using a lightweight WH_MOUSE_LL hook while the game is focused (and not in interactive overlay menu mode), we:
-//   - Confine the physical cursor inside the game's client rect so clicks never escape to the desktop.
-//   - Track the user's virtual cursor across the full upscaled output (outW_ x outH_) and map it proportionally to the
-//     game's client rect (width_ x height_), while respecting 3D games that recenter the cursor for camera look.
+// When output scaling is active, the game window is smaller (gameW x gameH) while the overlay stretches the picture
+// across the output area (outW x outH). Many games call ClipCursor() to trap the cursor inside their small client rect
+// or re-apply it when focus returns. We check GetClipCursor() and call ClipCursor(nullptr) whenever the game clips
+// it to a smaller rectangle while focused (outside interactive/menu mode), and remap movement + clicks proportionally.
 struct MouseRemapState
 {
     std::atomic<bool> active{ false };
     std::atomic<bool> selfMove{ false };
     HHOOK hook = nullptr;
-    RECT gameClientScreen{}; // game client area in screen coordinates
+    RECT gameClientScreen{};
+    RECT overlayScreen{};
     UINT gameW = 0;
     UINT gameH = 0;
     UINT outW = 0;
@@ -245,9 +241,41 @@ struct MouseRemapState
     bool hasLastPhys = false;
     int recenterCount = 0;
     ULONGLONG recenterWindowStart = 0;
+    std::atomic<ULONGLONG> lastGameClipUnlockTick{ 0 };
 };
 
 MouseRemapState g_mouseRemap;
+
+static bool IsRemappedMouseButtonEvent(WPARAM msg)
+{
+    return msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
+           msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
+           msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP;
+}
+
+static void MapScreenPointToGame(POINT screenPt, LONG& outGameX, LONG& outGameY)
+{
+    const RECT gr = g_mouseRemap.gameClientScreen;
+    const RECT ov = g_mouseRemap.overlayScreen;
+    const UINT gw = g_mouseRemap.gameW;
+    const UINT gh = g_mouseRemap.gameH;
+    const UINT ow = g_mouseRemap.outW;
+    const UINT oh = g_mouseRemap.outH;
+
+    const double normX = (ow > 1)
+        ? std::clamp((static_cast<double>(screenPt.x) - static_cast<double>(ov.left)) / static_cast<double>(ow - 1), 0.0, 1.0)
+        : 0.0;
+    const double normY = (oh > 1)
+        ? std::clamp((static_cast<double>(screenPt.y) - static_cast<double>(ov.top)) / static_cast<double>(oh - 1), 0.0, 1.0)
+        : 0.0;
+
+    g_mouseRemap.virtX = normX * static_cast<double>(ow > 0 ? ow - 1 : 0);
+    g_mouseRemap.virtY = normY * static_cast<double>(oh > 0 ? oh - 1 : 0);
+    g_mouseRemap.virtInit = true;
+
+    outGameX = gr.left + ((gw > 1) ? static_cast<LONG>(std::lround(normX * static_cast<double>(gw - 1))) : 0L);
+    outGameY = gr.top  + ((gh > 1) ? static_cast<LONG>(std::lround(normY * static_cast<double>(gh - 1))) : 0L);
+}
 
 LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
@@ -262,20 +290,19 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
                 return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
             }
 
-            if (wParam == WM_MOUSEMOVE)
-            {
-                const RECT gr = g_mouseRemap.gameClientScreen;
-                const UINT gw = g_mouseRemap.gameW;
-                const UINT gh = g_mouseRemap.gameH;
-                const UINT ow = g_mouseRemap.outW;
-                const UINT oh = g_mouseRemap.outH;
+            const RECT gr = g_mouseRemap.gameClientScreen;
+            const UINT gw = g_mouseRemap.gameW;
+            const UINT gh = g_mouseRemap.gameH;
+            const UINT ow = g_mouseRemap.outW;
+            const UINT oh = g_mouseRemap.outH;
 
-                if (gw > 1 && gh > 1 && ow > gw && oh > gh)
+            if (gw > 1 && gh > 1 && ow > gw && oh > gh)
+            {
+                if (wParam == WM_MOUSEMOVE)
                 {
                     const LONG centerX = gr.left + static_cast<LONG>(gw / 2);
                     const LONG centerY = gr.top + static_cast<LONG>(gh / 2);
 
-                    // Detect 3D camera recentering (game warps cursor back to center each frame)
                     const ULONGLONG nowTick = GetTickCount64();
                     if (nowTick - g_mouseRemap.recenterWindowStart > 500)
                     {
@@ -292,7 +319,6 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
                         return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
                     }
 
-                    // If game is actively recentering for 3D camera look, let raw deltas pass untouched
                     if (g_mouseRemap.recenterCount >= 3)
                     {
                         g_mouseRemap.lastPhys = ms->pt;
@@ -325,8 +351,22 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
                         {
                             g_mouseRemap.selfMove.store(true, std::memory_order_release);
                             SetCursorPos(targetX, targetY);
-                            return 1; // swallow unmapped move; SetCursorPos delivers the mapped position
+                            return 1;
                         }
+                    }
+                }
+                else if (IsRemappedMouseButtonEvent(wParam))
+                {
+                    LONG mappedX = ms->pt.x;
+                    LONG mappedY = ms->pt.y;
+                    MapScreenPointToGame(ms->pt, mappedX, mappedY);
+                    g_mouseRemap.lastPhys = { mappedX, mappedY };
+                    g_mouseRemap.hasLastPhys = true;
+
+                    if (mappedX != ms->pt.x || mappedY != ms->pt.y)
+                    {
+                        g_mouseRemap.selfMove.store(true, std::memory_order_release);
+                        SetCursorPos(mappedX, mappedY);
                     }
                 }
             }
@@ -2966,15 +3006,13 @@ void Host::ReleaseOutputScalingMouse()
     g_mouseRemap.active.store(false, std::memory_order_release);
     g_mouseRemap.virtInit = false;
     g_mouseRemap.hasLastPhys = false;
-    if (cursorClippedByUs_)
-    {
-        ClipCursor(nullptr);
-        cursorClippedByUs_ = false;
-    }
+    ClipCursor(nullptr);
+    cursorClippedByUs_ = false;
 }
 
 void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
 {
+    (void)now;
     const bool scaled = upOn_ && outW_ > width_ && outH_ > height_ && width_ > 1 && height_ > 1;
     const HWND fg = GetForegroundWindow();
     const bool gameFocused = scaled && !interactive_ && target_ && IsWindow(target_) && !IsIconic(target_) &&
@@ -2998,6 +3036,12 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
     if (screenRc.right - screenRc.left < 16 || screenRc.bottom - screenRc.top < 16)
         return;
 
+    RECT ovRc{};
+    if (overlay_ && IsWindow(overlay_) && GetWindowRect(overlay_, &ovRc))
+        g_mouseRemap.overlayScreen = ovRc;
+    else
+        g_mouseRemap.overlayScreen = RECT{ 0, 0, static_cast<LONG>(outW_), static_cast<LONG>(outH_) };
+
     g_mouseRemap.gameClientScreen = screenRc;
     g_mouseRemap.gameW = static_cast<UINT>(screenRc.right - screenRc.left);
     g_mouseRemap.gameH = static_cast<UINT>(screenRc.bottom - screenRc.top);
@@ -3005,19 +3049,21 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
     g_mouseRemap.outH = outH_;
     g_mouseRemap.active.store(true, std::memory_order_release);
 
-    // Re-assert ClipCursor periodically so the physical cursor stays inside the game client rect
-    // even if the game itself does not call ClipCursor (prevents clicks from hitting the desktop).
-    if (!cursorClippedByUs_ || now - cursorSyncAt_ > std::chrono::milliseconds(150))
+    // Re-unlock cursor whenever the game clips/locks it to a smaller rect (e.g. its small window on focus return)
+    RECT curClip{};
+    if (GetClipCursor(&curClip))
     {
-        cursorSyncAt_ = now;
-        RECT curClip{};
-        if (!GetClipCursor(&curClip) || curClip.left != screenRc.left || curClip.top != screenRc.top ||
-            curClip.right != screenRc.right || curClip.bottom != screenRc.bottom)
+        const int clipW = curClip.right - curClip.left;
+        const int clipH = curClip.bottom - curClip.top;
+        const int ovW = g_mouseRemap.overlayScreen.right - g_mouseRemap.overlayScreen.left;
+        const int ovH = g_mouseRemap.overlayScreen.bottom - g_mouseRemap.overlayScreen.top;
+        if (clipW > 0 && clipH > 0 && (clipW < ovW - 8 || clipH < ovH - 8))
         {
-            if (ClipCursor(&screenRc))
-                cursorClippedByUs_ = true;
+            ClipCursor(nullptr);
+            g_mouseRemap.lastGameClipUnlockTick.store(GetTickCount64(), std::memory_order_release);
         }
     }
+    cursorClippedByUs_ = false;
 }
 
 void Host::ToggleInteractive()
