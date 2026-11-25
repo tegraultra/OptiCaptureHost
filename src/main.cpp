@@ -245,11 +245,23 @@ struct MouseRemapState
     ULONGLONG lookUntil = 0;
     std::atomic<ULONGLONG> freeMoveTick{ 0 }; // last real mouse move that was not remapped
     ULONGLONG hiddenSince = 0;
+    std::atomic<bool> lk{ false }; // the hook runs on its own thread: guards geometry, virtX/Y, lastSet, virtInit
 };
 
 MouseRemapState g_mouseRemap;
 
 // Position of the real cursor for the game from the position the user sees on the stretched picture.
+struct RemapLock
+{
+    std::atomic<bool>& f;
+    explicit RemapLock(std::atomic<bool>& flag) : f(flag)
+    {
+        while (f.exchange(true, std::memory_order_acquire))
+            YieldProcessor();
+    }
+    ~RemapLock() { f.store(false, std::memory_order_release); }
+};
+
 static POINT MapVirtualToGame(const MouseRemapState& m)
 {
     const double ow = static_cast<double>(m.overlayScreen.right - m.overlayScreen.left);
@@ -266,6 +278,7 @@ static POINT MapVirtualToGame(const MouseRemapState& m)
 
 static void MapGameToVirtual(MouseRemapState& m, POINT cur)
 {
+    RemapLock guard(m.lk);
     const double ow = static_cast<double>(m.overlayScreen.right - m.overlayScreen.left);
     const double oh = static_cast<double>(m.overlayScreen.bottom - m.overlayScreen.top);
     const double gw = static_cast<double>(m.gameW > 0 ? m.gameW : 1);
@@ -294,9 +307,10 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
             // The system moves the cursor by (new - lastSet) from where we put it. Take that as the user's movement on the
             // big picture, then put the real cursor where the game has to see it. Clicks are left alone: they happen at
             // the real cursor, which is then over the right spot of the game window.
+            RemapLock guard(g_mouseRemap.lk);
             const int dx = ms->pt.x - g_mouseRemap.lastSet.x;
             const int dy = ms->pt.y - g_mouseRemap.lastSet.y;
-            if (dx != 0 || dy != 0)
+            if (g_mouseRemap.virtInit && (dx != 0 || dy != 0))
             {
                 g_mouseRemap.virtX = std::clamp(g_mouseRemap.virtX + dx, static_cast<double>(g_mouseRemap.overlayScreen.left),
                                                 static_cast<double>(g_mouseRemap.overlayScreen.right - 1));
@@ -310,6 +324,45 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
         }
     }
     return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
+}
+
+// The hook gets its own thread with its own message loop: on the render thread every mouse event would have to wait for
+// that thread, which costs frames as soon as the mouse moves (a 1000 Hz mouse sends 1000 events a second).
+std::thread g_hookThread;
+std::atomic<DWORD> g_hookThreadId{ 0 };
+
+static void StartMouseHookThread(HINSTANCE inst)
+{
+    if (g_hookThread.joinable())
+        return;
+    g_hookThread = std::thread([inst] {
+        MSG msg;
+        PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE); // creates the message queue
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        g_mouseRemap.hook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, inst, 0);
+        g_hookThreadId.store(GetCurrentThreadId(), std::memory_order_release);
+        while (GetMessageW(&msg, nullptr, 0, 0) > 0)
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (g_mouseRemap.hook)
+            UnhookWindowsHookEx(g_mouseRemap.hook);
+        g_mouseRemap.hook = nullptr;
+    });
+}
+
+static void StopMouseHookThread()
+{
+    if (!g_hookThread.joinable())
+        return;
+    for (int i = 0; i < 100 && g_hookThreadId.load(std::memory_order_acquire) == 0; ++i)
+        Sleep(1);
+    const DWORD id = g_hookThreadId.load(std::memory_order_acquire);
+    if (id)
+        PostThreadMessageW(id, WM_QUIT, 0, 0);
+    g_hookThread.join();
+    g_hookThreadId.store(0, std::memory_order_release);
 }
 
 // With the remap the real cursor sits in the small game window, so it is hidden (system cursors made invisible) and the
@@ -557,12 +610,28 @@ static void CursorWindowUpdate(HINSTANCE inst, HWND owner, HCURSOR cur, double x
         return;
 
     POINT pos{ static_cast<LONG>(std::lround(x)) - g_cursorOv.hotX, static_cast<LONG>(std::lround(y)) - g_cursorOv.hotY };
-    SIZE sz{ g_cursorOv.w, g_cursorOv.h };
-    POINT src{ 0, 0 };
-    BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-    UpdateLayeredWindow(g_cursorOv.wnd, nullptr, &pos, &sz, g_cursorOv.memDc, &src, 0, &bf, ULW_ALPHA);
-    if (!IsWindowVisible(g_cursorOv.wnd))
-        ShowWindow(g_cursorOv.wnd, SW_SHOWNOACTIVATE);
+    static HWND lastWnd = nullptr;
+    static POINT lastPos{ LONG_MIN, LONG_MIN };
+    static bool imageDirty = true;
+    if (cur != g_cursorOv.lastCur || lastWnd != g_cursorOv.wnd)
+        imageDirty = true;
+    const bool visible = IsWindowVisible(g_cursorOv.wnd) != FALSE;
+    if (imageDirty || !visible || lastWnd != g_cursorOv.wnd)
+    {
+        SIZE sz{ g_cursorOv.w, g_cursorOv.h };
+        POINT src{ 0, 0 };
+        BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        UpdateLayeredWindow(g_cursorOv.wnd, nullptr, &pos, &sz, g_cursorOv.memDc, &src, 0, &bf, ULW_ALPHA);
+        if (!visible)
+            ShowWindow(g_cursorOv.wnd, SW_SHOWNOACTIVATE);
+        imageDirty = false;
+    }
+    else if (pos.x != lastPos.x || pos.y != lastPos.y)
+    {
+        SetWindowPos(g_cursorOv.wnd, nullptr, pos.x, pos.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    lastWnd = g_cursorOv.wnd;
+    lastPos = pos;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -3195,7 +3264,10 @@ void Host::ReleaseOutputScalingMouse()
 {
     g_mouseRemap.active.store(false, std::memory_order_release);
     g_mouseRemap.remap.store(false, std::memory_order_release);
-    g_mouseRemap.virtInit = false;
+    {
+        RemapLock guard(g_mouseRemap.lk);
+        g_mouseRemap.virtInit = false;
+    }
     g_mouseRemap.lastUnlockTick = 0;
     CursorWindowHide();
     RestoreSystemCursors();
@@ -3217,8 +3289,7 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
         return;
     }
 
-    if (!g_mouseRemap.hook)
-        g_mouseRemap.hook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, inst_, 0);
+    StartMouseHookThread(inst_);
 
     RECT cr{};
     POINT tl{ 0, 0 };
@@ -3230,16 +3301,20 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
         return;
 
     RECT ovRc{};
-    if (overlay_ && IsWindow(overlay_) && GetWindowRect(overlay_, &ovRc))
-        g_mouseRemap.overlayScreen = ovRc;
-    else
-        g_mouseRemap.overlayScreen = RECT{ 0, 0, static_cast<LONG>(outW_), static_cast<LONG>(outH_) };
+    const bool haveOv = overlay_ && IsWindow(overlay_) && GetWindowRect(overlay_, &ovRc);
+    {
+        RemapLock guard(g_mouseRemap.lk);
+        if (haveOv)
+            g_mouseRemap.overlayScreen = ovRc;
+        else
+            g_mouseRemap.overlayScreen = RECT{ 0, 0, static_cast<LONG>(outW_), static_cast<LONG>(outH_) };
 
-    g_mouseRemap.gameClientScreen = screenRc;
-    g_mouseRemap.gameW = static_cast<UINT>(screenRc.right - screenRc.left);
-    g_mouseRemap.gameH = static_cast<UINT>(screenRc.bottom - screenRc.top);
-    g_mouseRemap.outW = outW_;
-    g_mouseRemap.outH = outH_;
+        g_mouseRemap.gameClientScreen = screenRc;
+        g_mouseRemap.gameW = static_cast<UINT>(screenRc.right - screenRc.left);
+        g_mouseRemap.gameH = static_cast<UINT>(screenRc.bottom - screenRc.top);
+        g_mouseRemap.outW = outW_;
+        g_mouseRemap.outH = outH_;
+    }
     g_mouseRemap.active.store(true, std::memory_order_release);
 
     // Pointer remap. Only while the game shows its pointer: with a hidden pointer (camera control) the game recentres it
@@ -3253,44 +3328,60 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
         GetCursorPos(&cur);
         const ULONGLONG t = GetTickCount64();
         const bool btnDown = ((GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON) | GetAsyncKeyState(VK_MBUTTON)) & 0x8000) != 0;
-        const bool warped = g_mouseRemap.virtInit && (cur.x != g_mouseRemap.lastSet.x || cur.y != g_mouseRemap.lastSet.y);
+        bool init = false;
+        POINT last{};
+        {
+            RemapLock guard(g_mouseRemap.lk);
+            init = g_mouseRemap.virtInit;
+            last = g_mouseRemap.lastSet;
+        }
+        const bool warped = init && (cur.x != last.x || cur.y != last.y);
         if (warped && !btnDown)
         {
-            // A game that keeps putting the cursor back (mouse look) would make the pointer jump: after a few warps in a
-            // short time, leave the cursor to the game for a moment.
-            if (t - g_mouseRemap.warpStart > 250)
+            // A game that keeps putting the cursor back (mouse look) would make the pointer jump: after two warps in a
+            // short time, leave the cursor to the game.
+            if (t - g_mouseRemap.warpStart > 500)
             {
                 g_mouseRemap.warpStart = t;
                 g_mouseRemap.warpCount = 0;
             }
-            if (++g_mouseRemap.warpCount >= 3)
-                g_mouseRemap.lookUntil = t + 400;
+            if (++g_mouseRemap.warpCount >= 2)
+                g_mouseRemap.lookUntil = t + 1000;
         }
         // Mouse look goes on as long as the mouse keeps moving; it ends a moment after it stops.
-        if (t < g_mouseRemap.lookUntil && t - g_mouseRemap.freeMoveTick.load(std::memory_order_acquire) < 300)
-            g_mouseRemap.lookUntil = t + 400;
+        if (t < g_mouseRemap.lookUntil && t - g_mouseRemap.freeMoveTick.load(std::memory_order_acquire) < 600)
+            g_mouseRemap.lookUntil = t + 1000;
         g_mouseRemap.hiddenSince = 0;
         const bool look = t < g_mouseRemap.lookUntil;
         // Held button or mouse look: the real cursor is the truth, the drawn pointer just follows it.
-        if (btnDown || look || warped || !g_mouseRemap.virtInit)
+        if (btnDown || look || warped || !init)
             MapGameToVirtual(g_mouseRemap, cur);
+        double vx = 0.0, vy = 0.0;
+        {
+            RemapLock guard(g_mouseRemap.lk);
+            vx = g_mouseRemap.virtX;
+            vy = g_mouseRemap.virtY;
+        }
         BlankSystemCursors(inst_);
         g_mouseRemap.remap.store(!btnDown && !look, std::memory_order_release);
         if (look)
             CursorWindowHide();
         else
-            CursorWindowUpdate(inst_, overlay_, ci.hCursor, g_mouseRemap.virtX, g_mouseRemap.virtY);
+            CursorWindowUpdate(inst_, overlay_, ci.hCursor, vx, vy);
     }
     else
     {
         g_mouseRemap.remap.store(false, std::memory_order_release);
-        g_mouseRemap.virtInit = false;
+        {
+            RemapLock guard(g_mouseRemap.lk);
+            g_mouseRemap.virtInit = false;
+        }
         CursorWindowHide();
         // A game that hides and shows its pointer all the time must not make the real one flash: restore only after a pause.
         const ULONGLONG t = GetTickCount64();
         if (g_mouseRemap.hiddenSince == 0)
             g_mouseRemap.hiddenSince = t;
-        if (t - g_mouseRemap.hiddenSince > 700)
+        if (t - g_mouseRemap.hiddenSince > 2000)
             RestoreSystemCursors();
     }
 
@@ -3503,11 +3594,7 @@ void Host::Shutdown()
 {
     ReleaseOutputScalingMouse();
     CursorWindowDestroy();
-    if (g_mouseRemap.hook)
-    {
-        UnhookWindowsHookEx(g_mouseRemap.hook);
-        g_mouseRemap.hook = nullptr;
-    }
+    StopMouseHookThread();
     DeleteFileW(oc::StatusPath().c_str());
     DeleteFileW((oc::StatusPath() + L".tmp").c_str());
     try
