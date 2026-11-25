@@ -1562,12 +1562,9 @@ void Host::UpdateLabel()
         return;
     if (!labelAlways_ && std::chrono::steady_clock::now() > labelUntil_)
     {
-        // Don't destroy the label window: keep it alive but hidden. Calling SetWindowPos on this small
-        // topmost window every 250 ms keeps DWM in a stable composition state, which prevents frame
-        // drops during camera rotation. Destroying it causes DWM to re-compose the large overlay.
-        ShowWindow(label_, SW_HIDE);
-        // Keep calling SetWindowPos on the (now hidden) label to maintain DWM stability
-        SetWindowPos(label_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
+        // Keep the label window visible but make it fully transparent (alpha 0).
+        // This keeps DWM composing it every frame (maintaining stability) while making it invisible.
+        SetLayeredWindowAttributes(label_, 0, 0, LWA_ALPHA);
         return;
     }
     // stay above the overlay (even when hidden, this keeps DWM stable)
