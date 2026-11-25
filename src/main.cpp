@@ -1556,7 +1556,6 @@ void Host::UpdateLabel()
             SetWindowTextW(label_, text);
             InvalidateRect(label_, nullptr, TRUE);
             labelUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(st_.labelSeconds);
-            g_labelTextVisible = true; // text visible again when resolution changes
         }
         else
         {
