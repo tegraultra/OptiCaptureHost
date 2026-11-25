@@ -195,12 +195,12 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
     case DLL_PROCESS_ATTACH:
         if (!reshade::register_addon(module))
             return FALSE;
-        reshade::register_event<addon_event::reshade_finish_effects>(OnFinishEffects);
-        reshade::register_event<addon_event::destroy_device>(OnDestroyDevice);
+        ::reshade::register_event< ::reshade::addon_event::reshade_finish_effects>(OnFinishEffects);
+        ::reshade::register_event< ::reshade::addon_event::destroy_device>(OnDestroyDevice);
         break;
     case DLL_PROCESS_DETACH:
-        reshade::unregister_event<addon_event::reshade_finish_effects>(OnFinishEffects);
-        reshade::unregister_event<addon_event::destroy_device>(OnDestroyDevice);
+        ::reshade::unregister_event< ::reshade::addon_event::reshade_finish_effects>(OnFinishEffects);
+        ::reshade::unregister_event< ::reshade::addon_event::destroy_device>(OnDestroyDevice);
         reshade::unregister_addon(module);
         break;
     }
