@@ -3845,31 +3845,31 @@ void App::DrawDepthPanel(gp::Graphics& g)
 
     Text(g, L"How to use", *f_.bodyB, R(18, 346, 234, 22), col::Text());
     {
-        const gp::RectF box = R(18, 372, 234, 256);
+        const gp::RectF box = R(18, 372, 234, 296);
         FillRound(g, box, S(10), col::Alpha(col::Accent(), 24));
         StrokeRound(g, box, S(10), col::Alpha(col::Accent(), 90), max(1.0f, S(1)));
         Text(g,
-             L"1. Put ready ReShade files inside \"ReShade depth\" next to the launcher.\n"
-             L"2. Select your game and press \"Install ReShade to game\" below.\n"
-             L"3. Restart the game completely, then tick OptiCaptureDepth on in ReShade.\n"
-             L"4. Single-player DX11/DX12 games only (do not use online).",
-             *f_.sm, R(28, 380, 216, 240), col::Text(), 0, true);
+             L"1. First, install ReShade (with Add-on support) onto your game.\n"
+             L"2. Select your game and press \"Install ReShade files\" below: it closes the game, copies only the required files from \"ReShade depth\" next to the game exe, and restarts it.\n"
+             L"3. Tick OptiCaptureDepth on in ReShade's menu.\n"
+             L"4. Supports DX11/DX12 (GPU) and DX9/DX10/OpenGL/Vulkan (CPU). Single-player only.",
+             *f_.sm, R(28, 380, 216, 280), col::Text(), 0, true);
     }
     {
         const bool pick = selected_ >= 0 && selected_ < static_cast<int>(games_.size()) && !Running();
-        const gp::RectF instBtn = R(18, 638, 234, 34);
+        const gp::RectF instBtn = R(18, 678, 234, 34);
         const bool hotI = hover_ == kIdDepthInstall && pick;
         if (pick)
             FillRound(g, instBtn, S(9), hotI ? col::Accent2() : col::Accent());
         else
             FillRound(g, instBtn, S(9), col::Row());
         StrokeRound(g, instBtn, S(9), hotI ? col::Accent2() : col::Line(), max(1.0f, S(1)));
-        Text(g, L"Install ReShade to game", *f_.chip, instBtn, pick ? col::White() : col::Muted(), 1);
+        Text(g, L"Install ReShade files", *f_.chip, instBtn, pick ? col::White() : col::Muted(), 1);
         if (pick)
             AddHit(instBtn, kIdDepthInstall);
     }
     {
-        const gp::RectF btn = R(18, 680, 234, 32);
+        const gp::RectF btn = R(18, 720, 234, 32);
         const bool hot = hover_ == kIdDepthFolder;
         FillRound(g, btn, S(9), hot ? col::RowHot() : col::Row());
         StrokeRound(g, btn, S(9), hot ? col::Accent2() : col::Line(), max(1.0f, S(1)));
