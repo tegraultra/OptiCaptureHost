@@ -3264,10 +3264,14 @@ void App::OnClick(int id)
             WritePictureIni(true);
             ReadPictureState();
         }
+        else
+        {
+            st_.upscale = 0; // Off when Flat is selected
+        }
         Save();
         SetNote(st_.depthSource == 1
                     ? L"Depth: ReShade. Output scaling automatically set to DLSS · Quality."
-                    : L"Depth: Flat, as always.", Note::Ok);
+                    : L"Depth: Flat, as always. Output scaling set to Off.", Note::Ok);
         InvalidatePanel();
     }
     else if (id == kIdDepthInstall)

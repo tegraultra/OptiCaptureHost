@@ -578,6 +578,13 @@ class Host
     // Depth from the ReShade add-on (st_.depthSource == 1). With depthSource 0 none of this runs and the flat depth above is used,
     // exactly as before. The add-on shares a texture of the game's linear depth; it is copied over fsrDepth_ every frame.
     ComPtr<ID3D12Resource> rsDepth_;
+    ComPtr<ID3D12Resource> rsCpuUpload_;
+    void* rsCpuUploadPtr_ = nullptr;
+    UINT64 rsCpuUploadCap_ = 0;
+    HANDLE rsCpuMap_ = nullptr;
+    ocdepth::CpuHeader* rsCpuHdr_ = nullptr;
+    const float* rsCpuPixels_ = nullptr;
+    bool rsUsingCpu_ = false;
     HANDLE rsMap_ = nullptr;
     ocdepth::Share* rsInfo_ = nullptr;
     unsigned long long rsHandleSeen_ = 0;
@@ -1917,6 +1924,25 @@ bool Host::RecordDlss(ID3D12Resource*, bool) { return false; }
 void Host::CloseReshadeDepth()
 {
     rsDepth_.Reset();
+    if (rsCpuUpload_ && rsCpuUploadPtr_)
+    {
+        rsCpuUpload_->Unmap(0, nullptr);
+        rsCpuUploadPtr_ = nullptr;
+    }
+    rsCpuUpload_.Reset();
+    rsCpuUploadCap_ = 0;
+    if (rsCpuHdr_)
+    {
+        UnmapViewOfFile(rsCpuHdr_);
+        rsCpuHdr_ = nullptr;
+        rsCpuPixels_ = nullptr;
+    }
+    if (rsCpuMap_)
+    {
+        CloseHandle(rsCpuMap_);
+        rsCpuMap_ = nullptr;
+    }
+    rsUsingCpu_ = false;
     if (rsInfo_)
     {
         UnmapViewOfFile(rsInfo_);
@@ -1931,8 +1957,7 @@ void Host::CloseReshadeDepth()
     rsW_ = rsH_ = 0;
 }
 
-// Finds the memory block of the ReShade add-on inside the game, duplicates the handle of its shared depth texture into this process
-// and opens it. Called about once a second while that has not worked (or when the add-on made a new texture).
+// Finds the memory block of the ReShade add-on inside the game and connects via GPU shared texture or CPU shared buffer.
 void Host::ConnectReshadeDepth()
 {
     DWORD pid = 0;
@@ -1960,7 +1985,48 @@ void Host::ConnectReshadeDepth()
             return;
         }
     }
-    if (rsInfo_->magic != ocdepth::kMagic || rsInfo_->version != ocdepth::kVersion || rsInfo_->handle == 0)
+    if (rsInfo_->magic != ocdepth::kMagic || rsInfo_->version != ocdepth::kVersion)
+    {
+        rsState_ = 1;
+        return;
+    }
+
+    if (rsInfo_->transport == static_cast<uint32_t>(ocdepth::Transport::CpuBuffer))
+    {
+        if (!rsCpuHdr_)
+        {
+            wchar_t cname[96];
+            swprintf_s(cname, L"Local\\OptiCaptureDepthCpu_%lu", static_cast<unsigned long>(pid));
+            rsCpuMap_ = OpenFileMappingW(FILE_MAP_READ, FALSE, cname);
+            if (!rsCpuMap_)
+            {
+                rsState_ = 1;
+                return;
+            }
+            void* view = MapViewOfFile(rsCpuMap_, FILE_MAP_READ, 0, 0, 0);
+            if (!view)
+            {
+                CloseHandle(rsCpuMap_);
+                rsCpuMap_ = nullptr;
+                rsState_ = 4;
+                return;
+            }
+            rsCpuHdr_ = static_cast<ocdepth::CpuHeader*>(view);
+            rsCpuPixels_ = reinterpret_cast<const float*>(static_cast<const uint8_t*>(view) + sizeof(ocdepth::CpuHeader));
+        }
+        if (rsCpuHdr_->magic != ocdepth::kMagic || rsCpuHdr_->version != ocdepth::kVersion || rsCpuHdr_->width == 0 || rsCpuHdr_->height == 0)
+        {
+            rsState_ = 1;
+            return;
+        }
+        rsUsingCpu_ = true;
+        rsW_ = rsCpuHdr_->width;
+        rsH_ = rsCpuHdr_->height;
+        rsState_ = 1;
+        return;
+    }
+
+    if (rsInfo_->handle == 0)
     {
         rsState_ = 1;
         return;
@@ -1995,13 +2061,14 @@ void Host::ConnectReshadeDepth()
         Log("ReShade depth: OpenSharedHandle failed (0x%08lX)", static_cast<unsigned long>(hr));
         return;
     }
+    rsUsingCpu_ = false;
     rsDepth_ = res;
     rsHandleSeen_ = rsInfo_->handle;
     const D3D12_RESOURCE_DESC d = res->GetDesc();
     rsW_ = static_cast<UINT>(d.Width);
     rsH_ = d.Height;
     rsState_ = 1;
-    Log("ReShade depth: opened the game's shared depth (%ux%u, game API Direct3D %u)", rsW_, rsH_, rsInfo_->api);
+    Log("ReShade depth: opened the game's shared depth (%ux%u, game API code %u)", rsW_, rsH_, rsInfo_->api);
 }
 
 // Per frame, before the final pass: the captured frame is copied, its motion measured against the frame before, and AMD's upscaler runs.
@@ -2058,17 +2125,89 @@ void Host::RecordFsrTemporal()
     if (st_.depthSource == 1)
     {
         const auto t = std::chrono::steady_clock::now();
-        const bool need = !rsDepth_ || !rsInfo_ || rsInfo_->handle != rsHandleSeen_;
+        const bool need = (!rsUsingCpu_ && (!rsDepth_ || !rsInfo_ || rsInfo_->handle != rsHandleSeen_)) || (rsUsingCpu_ && !rsCpuHdr_);
         if (need && t - rsTry_ > std::chrono::seconds(1))
         {
             rsTry_ = t;
             ConnectReshadeDepth();
         }
-        if (rsDepth_ && rsW_ == width_ && rsH_ == height_)
+        if (!rsUsingCpu_ && rsDepth_ && rsW_ == width_ && rsH_ == height_)
         {
             barrier(fsrDepth_.Get(), nps, D3D12_RESOURCE_STATE_COPY_DEST);
             list_->CopyResource(fsrDepth_.Get(), rsDepth_.Get());
             barrier(fsrDepth_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, nps);
+        }
+        else if (rsUsingCpu_ && rsCpuHdr_ && rsCpuPixels_)
+        {
+            const UINT dw = rsCpuHdr_->width;
+            const UINT dh = rsCpuHdr_->height;
+            rsW_ = dw;
+            rsH_ = dh;
+            if (dw == width_ && dh == height_)
+            {
+                const UINT64 rowPitch = (static_cast<UINT64>(dw) * sizeof(float) + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) &
+                                        ~static_cast<UINT64>(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+                const UINT64 reqBytes = rowPitch * static_cast<UINT64>(dh);
+                if (!rsCpuUpload_ || rsCpuUploadCap_ < reqBytes)
+                {
+                    if (rsCpuUpload_ && rsCpuUploadPtr_)
+                    {
+                        rsCpuUpload_->Unmap(0, nullptr);
+                        rsCpuUploadPtr_ = nullptr;
+                    }
+                    rsCpuUpload_.Reset();
+                    rsCpuUploadCap_ = 0;
+
+                    D3D12_HEAP_PROPERTIES uhp{};
+                    uhp.Type = D3D12_HEAP_TYPE_UPLOAD;
+                    D3D12_RESOURCE_DESC urd{};
+                    urd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                    urd.Width = reqBytes;
+                    urd.Height = 1;
+                    urd.DepthOrArraySize = 1;
+                    urd.MipLevels = 1;
+                    urd.Format = DXGI_FORMAT_UNKNOWN;
+                    urd.SampleDesc.Count = 1;
+                    urd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                    if (SUCCEEDED(dev12_->CreateCommittedResource(&uhp, D3D12_HEAP_FLAG_NONE, &urd,
+                                                                  D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                                  IID_PPV_ARGS(&rsCpuUpload_))))
+                    {
+                        D3D12_RANGE readRange{ 0, 0 };
+                        if (SUCCEEDED(rsCpuUpload_->Map(0, &readRange, &rsCpuUploadPtr_)))
+                            rsCpuUploadCap_ = reqBytes;
+                    }
+                }
+                if (rsCpuUpload_ && rsCpuUploadPtr_)
+                {
+                    const size_t srcRowBytes = static_cast<size_t>(dw) * sizeof(float);
+                    const size_t srcPitchBytes = rsCpuHdr_->rowPitchBytes >= srcRowBytes ? rsCpuHdr_->rowPitchBytes : srcRowBytes;
+                    const auto* srcBytes = reinterpret_cast<const uint8_t*>(rsCpuPixels_);
+                    auto* dstBytes = static_cast<uint8_t*>(rsCpuUploadPtr_);
+                    for (UINT y = 0; y < dh; ++y)
+                        std::memcpy(dstBytes + static_cast<size_t>(y) * static_cast<size_t>(rowPitch),
+                                    srcBytes + static_cast<size_t>(y) * srcPitchBytes, srcRowBytes);
+
+                    D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+                    dstLoc.pResource = fsrDepth_.Get();
+                    dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    dstLoc.SubresourceIndex = 0;
+
+                    D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+                    srcLoc.pResource = rsCpuUpload_.Get();
+                    srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                    srcLoc.PlacedFootprint.Offset = 0;
+                    srcLoc.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32_FLOAT;
+                    srcLoc.PlacedFootprint.Footprint.Width = dw;
+                    srcLoc.PlacedFootprint.Footprint.Height = dh;
+                    srcLoc.PlacedFootprint.Footprint.Depth = 1;
+                    srcLoc.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(rowPitch);
+
+                    barrier(fsrDepth_.Get(), nps, D3D12_RESOURCE_STATE_COPY_DEST);
+                    list_->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+                    barrier(fsrDepth_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, nps);
+                }
+            }
         }
     }
 
@@ -2828,7 +2967,7 @@ void Host::PublishLive(std::chrono::steady_clock::time_point now)
     if (st_.depthSource == 1)
     {
         int ds = rsState_;
-        if (rsDepth_ && rsInfo_)
+        if (rsInfo_ && ((rsUsingCpu_ && rsCpuHdr_) || (!rsUsingCpu_ && rsDepth_)))
         {
             if (rsW_ != width_ || rsH_ != height_)
             {
@@ -2836,7 +2975,7 @@ void Host::PublishLive(std::chrono::steady_clock::time_point now)
             }
             else
             {
-                const unsigned long long f = rsInfo_->frame;
+                const unsigned long long f = rsUsingCpu_ && rsCpuHdr_ ? rsCpuHdr_->frame : rsInfo_->frame;
                 ds = f != rsFrameSeen_ ? 2 : 5;
                 rsFrameSeen_ = f;
             }

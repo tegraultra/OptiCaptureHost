@@ -3,7 +3,7 @@
 //
 // It does not look for the depth buffer itself: it reuses ReShade's own depth detection through the small effect
 // OptiCaptureDepth.fx (which writes the linearised depth, 0 = near, 1 = far, into the texture OC_LinearDepth). Every frame this
-// add-on copies that texture into a shared texture and tells OptiCaptureHost.exe where it is. Direct3D 11 and 12 games only.
+// add-on copies that texture into a shared texture (D3D11 / D3D12) or a CPU shared memory buffer (other APIs) and tells OptiCaptureHost.exe.
 //
 // ReShade's headers (BSD-3-Clause, Copyright (C) Patrick Mours) are used to build this file; see NOTICE.md.
 
@@ -11,7 +11,9 @@
 #include <Windows.h>
 
 #include <cstdio>
+#include <cstring>
 #include <mutex>
+#include <vector>
 
 #include "../depth_share.h"
 
@@ -26,8 +28,29 @@ void* g_handle = nullptr; // NT handle (kept open for as long as the texture liv
 uint32_t g_w = 0, g_h = 0;
 HANDLE g_map = nullptr;
 ocdepth::Share* g_info = nullptr;
+
+HANDLE g_cpuMap = nullptr;
+ocdepth::CpuHeader* g_cpuHdr = nullptr;
+float* g_cpuPixels = nullptr;
+size_t g_cpuCapBytes = 0;
+
+bool g_useCpu = false;
 bool g_failed = false; // sharing is not possible here: say so once and stop trying
 bool g_loggedMissing = false;
+
+uint32_t ApiCode(device_api api)
+{
+    switch (api)
+    {
+    case device_api::d3d12: return 12u;
+    case device_api::d3d11: return 11u;
+    case device_api::d3d10: return 10u;
+    case device_api::d3d9:  return 9u;
+    case device_api::opengl: return 100u;
+    case device_api::vulkan: return 200u;
+    default: return 0u;
+    }
+}
 
 void Say(reshade::log::level level, const char* text)
 {
@@ -50,7 +73,66 @@ bool OpenInfo()
         g_map = nullptr;
         return false;
     }
+    std::memset(g_info, 0, sizeof(ocdepth::Share));
     g_info->pid = GetCurrentProcessId();
+    return true;
+}
+
+void DropCpuBuffer()
+{
+    if (g_cpuHdr)
+    {
+        UnmapViewOfFile(g_cpuHdr);
+        g_cpuHdr = nullptr;
+        g_cpuPixels = nullptr;
+    }
+    if (g_cpuMap)
+    {
+        CloseHandle(g_cpuMap);
+        g_cpuMap = nullptr;
+    }
+    g_cpuCapBytes = 0;
+}
+
+bool EnsureCpuBuffer(uint32_t w, uint32_t h)
+{
+    const size_t dataBytes = static_cast<size_t>(w) * static_cast<size_t>(h) * sizeof(float);
+    const size_t totalBytes = sizeof(ocdepth::CpuHeader) + dataBytes;
+    if (g_cpuHdr && g_cpuCapBytes >= totalBytes && g_w == w && g_h == h)
+        return true;
+
+    DropCpuBuffer();
+    char name[96];
+    std::snprintf(name, sizeof(name), "Local\\OptiCaptureDepthCpu_%lu", GetCurrentProcessId());
+    g_cpuMap = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, static_cast<DWORD>(totalBytes >> 32), name);
+    if (!g_cpuMap)
+    {
+        g_cpuMap = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, static_cast<DWORD>(totalBytes & 0xFFFFFFFFULL), name);
+    }
+    if (!g_cpuMap)
+        return false;
+
+    void* view = MapViewOfFile(g_cpuMap, FILE_MAP_ALL_ACCESS, 0, 0, totalBytes);
+    if (!view)
+    {
+        CloseHandle(g_cpuMap);
+        g_cpuMap = nullptr;
+        return false;
+    }
+
+    g_cpuHdr = static_cast<ocdepth::CpuHeader*>(view);
+    g_cpuPixels = reinterpret_cast<float*>(static_cast<uint8_t*>(view) + sizeof(ocdepth::CpuHeader));
+    g_cpuCapBytes = totalBytes;
+    g_w = w;
+    g_h = h;
+
+    g_cpuHdr->magic = ocdepth::kMagic;
+    g_cpuHdr->version = ocdepth::kVersion;
+    g_cpuHdr->width = w;
+    g_cpuHdr->height = h;
+    g_cpuHdr->rowPitchBytes = w * static_cast<uint32_t>(sizeof(float));
+    g_cpuHdr->reserved = 0;
+    g_cpuHdr->frame = 0;
     return true;
 }
 
@@ -59,6 +141,7 @@ void DropShared(effect_runtime* runtime)
     if (g_info)
     {
         g_info->handle = 0; // the host stops using it before it goes away
+        g_info->transport = static_cast<uint32_t>(ocdepth::Transport::None);
         g_info->magic = 0;
     }
     if (g_shared.handle != 0 && g_device)
@@ -73,33 +156,14 @@ void DropShared(effect_runtime* runtime)
         CloseHandle(static_cast<HANDLE>(g_handle));
         g_handle = nullptr;
     }
+    DropCpuBuffer();
     g_w = g_h = 0;
+    g_useCpu = false;
 }
 
 bool MakeShared(effect_runtime* runtime, device* dev, uint32_t w, uint32_t h)
 {
     DropShared(runtime);
-    if (!dev->check_capability(device_caps::shared_resource_nt_handle))
-    {
-        Say(reshade::log::level::warning, "OptiCaptureDepth: this graphics API cannot share textures with other processes (Direct3D 11 and 12 only).");
-        g_failed = true;
-        return false;
-    }
-
-    const resource_desc desc(w, h, 1, 1, format::r32_float, 1, memory_heap::default_,
-                             resource_usage::copy_dest | resource_usage::shader_resource,
-                             resource_flags::shared | resource_flags::shared_nt_handle);
-    void* handle = nullptr; // null: ReShade creates the texture and returns its shared handle
-    if (!dev->create_resource(desc, nullptr, resource_usage::general, &g_shared, &handle) || handle == nullptr)
-    {
-        Say(reshade::log::level::error, "OptiCaptureDepth: could not create the shared depth texture.");
-        g_failed = true;
-        g_shared = { 0 };
-        return false;
-    }
-    g_handle = handle;
-    g_w = w;
-    g_h = h;
 
     if (!OpenInfo())
     {
@@ -107,16 +171,56 @@ bool MakeShared(effect_runtime* runtime, device* dev, uint32_t w, uint32_t h)
         g_failed = true;
         return false;
     }
+
+    if (dev->check_capability(device_caps::shared_resource_nt_handle))
+    {
+        const resource_desc desc(w, h, 1, 1, format::r32_float, 1, memory_heap::default_,
+                                 resource_usage::copy_dest | resource_usage::shader_resource,
+                                 resource_flags::shared | resource_flags::shared_nt_handle);
+        void* handle = nullptr;
+        if (dev->create_resource(desc, nullptr, resource_usage::general, &g_shared, &handle) && handle != nullptr)
+        {
+            g_handle = handle;
+            g_w = w;
+            g_h = h;
+            g_useCpu = false;
+
+            g_info->version = ocdepth::kVersion;
+            g_info->handle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(handle));
+            g_info->width = w;
+            g_info->height = h;
+            g_info->dxgiFormat = 41; // DXGI_FORMAT_R32_FLOAT
+            g_info->api = ApiCode(dev->get_api());
+            g_info->transport = static_cast<uint32_t>(ocdepth::Transport::GpuShared);
+            g_info->magic = ocdepth::kMagic;
+
+            char text[160];
+            std::snprintf(text, sizeof(text), "OptiCaptureDepth: sharing GPU depth texture (%ux%u).", w, h);
+            Say(reshade::log::level::info, text);
+            return true;
+        }
+    }
+
+    // Fallback: CPU shared memory for APIs without NT shared texture handles (D3D9, D3D10, OpenGL, Vulkan).
+    if (!EnsureCpuBuffer(w, h))
+    {
+        Say(reshade::log::level::error, "OptiCaptureDepth: could not create CPU shared depth buffer.");
+        g_failed = true;
+        return false;
+    }
+
+    g_useCpu = true;
     g_info->version = ocdepth::kVersion;
-    g_info->handle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(handle));
+    g_info->handle = 0;
     g_info->width = w;
     g_info->height = h;
     g_info->dxgiFormat = 41; // DXGI_FORMAT_R32_FLOAT
-    g_info->api = dev->get_api() == device_api::d3d12 ? 12u : 11u;
+    g_info->api = ApiCode(dev->get_api());
+    g_info->transport = static_cast<uint32_t>(ocdepth::Transport::CpuBuffer);
     g_info->magic = ocdepth::kMagic;
 
-    char text[160];
-    std::snprintf(text, sizeof(text), "OptiCaptureDepth: sharing the depth texture with the host (%ux%u).", w, h);
+    char text[180];
+    std::snprintf(text, sizeof(text), "OptiCaptureDepth: sharing depth via CPU buffer (%ux%u, api=%u).", w, h, g_info->api);
     Say(reshade::log::level::info, text);
     return true;
 }
@@ -155,24 +259,48 @@ void OnFinishEffects(effect_runtime* runtime, command_list* cmd_list, resource_v
         return;
 
     g_device = dev;
-    if (g_shared == 0 || g_w != sd.texture.width || g_h != sd.texture.height)
+    if ((!g_useCpu && (g_shared == 0 || g_w != sd.texture.width || g_h != sd.texture.height)) ||
+        (g_useCpu && (!g_cpuHdr || g_w != sd.texture.width || g_h != sd.texture.height)))
     {
         if (!MakeShared(runtime, dev, sd.texture.width, sd.texture.height))
             return;
     }
 
-    cmd_list->barrier(src, resource_usage::shader_resource, resource_usage::copy_source);
-    cmd_list->barrier(g_shared, resource_usage::general, resource_usage::copy_dest);
-    cmd_list->copy_resource(src, g_shared);
-    cmd_list->barrier(g_shared, resource_usage::copy_dest, resource_usage::general);
-    cmd_list->barrier(src, resource_usage::copy_source, resource_usage::shader_resource);
+    if (!g_useCpu)
+    {
+        cmd_list->barrier(src, resource_usage::shader_resource, resource_usage::copy_source);
+        cmd_list->barrier(g_shared, resource_usage::general, resource_usage::copy_dest);
+        cmd_list->copy_resource(src, g_shared);
+        cmd_list->barrier(g_shared, resource_usage::copy_dest, resource_usage::general);
+        cmd_list->barrier(src, resource_usage::copy_source, resource_usage::shader_resource);
 
-    // Direct3D 11: other devices only see the new picture once the commands were really sent.
-    if (runtime->get_command_queue())
-        runtime->get_command_queue()->flush_immediate_command_list();
+        if (runtime->get_command_queue())
+            runtime->get_command_queue()->flush_immediate_command_list();
 
-    if (g_info)
-        InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&g_info->frame));
+        if (g_info)
+            InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&g_info->frame));
+    }
+    else if (g_cpuHdr && g_cpuPixels)
+    {
+        const uint32_t w = sd.texture.width;
+        const uint32_t h = sd.texture.height;
+        const size_t rowFloats = static_cast<size_t>(w);
+        std::vector<uint8_t> raw;
+        if (runtime->download_texture_region(src, 0, nullptr, raw))
+        {
+            const size_t expected = rowFloats * static_cast<size_t>(h) * sizeof(float);
+            if (raw.size() >= expected)
+            {
+                std::memcpy(g_cpuPixels, raw.data(), expected);
+                g_cpuHdr->width = w;
+                g_cpuHdr->height = h;
+                g_cpuHdr->rowPitchBytes = static_cast<uint32_t>(rowFloats * sizeof(float));
+                InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&g_cpuHdr->frame));
+                if (g_info)
+                    InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&g_info->frame));
+            }
+        }
+    }
 }
 
 void OnDestroyDevice(device*)
@@ -186,7 +314,7 @@ void OnDestroyDevice(device*)
 
 extern "C" __declspec(dllexport) const char* NAME = "OptiCaptureDepth";
 extern "C" __declspec(dllexport) const char* DESCRIPTION =
-    "Shares the game's depth (through ReShade's depth detection and the effect OptiCaptureDepth.fx) with OptiCaptureHost. by MK-JH";
+    "Shares the game's depth (GPU shared handle on D3D11/12, or CPU shared memory on other APIs) with OptiCaptureHost. by MK-JH";
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {
