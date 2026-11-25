@@ -250,8 +250,6 @@ struct MouseRemapState
 
 MouseRemapState g_mouseRemap;
 
-bool g_labelTextVisible = true;
-
 // Position of the real cursor for the game from the position the user sees on the stretched picture.
 struct RemapLock
 {
@@ -918,10 +916,7 @@ LRESULT CALLBACK LabelProc(HWND h, UINT m, WPARAM w, LPARAM l)
                               CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         HGDIOBJ old = SelectObject(dc, f);
         SetBkMode(dc, TRANSPARENT);
-        if (g_labelTextVisible)
-            SetTextColor(dc, RGB(120, 255, 140));
-        else
-            SetTextColor(dc, RGB(12, 12, 16)); // match background -> invisible text
+        SetTextColor(dc, RGB(120, 255, 140));
         DrawTextW(dc, t, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(dc, old);
         DeleteObject(f);
@@ -1531,17 +1526,16 @@ void Host::CreateLabel()
     static const wchar_t* const lvNames[] = { L"Quality", L"Balanced", L"Performance", L"Native" };
     swprintf(text, 64, L"%u to %u  (%s \u00B7 %s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 5) ? upMethod_ : 0],
              lvNames[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 3) ? st_.upscaleLevel : 0]);
-    // Create a tiny 1x1 transparent TOPMOST window at off-screen position (0,0).
-    // This keeps DWM composing it without interfering with overlay click-through.
-    // Not a child - avoids any focus/click issues with the overlay.
-    label_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, wc.lpszClassName,
-                             L"", WS_POPUP, -1000, -1000, 1, 1, nullptr, nullptr, inst_, nullptr);
+    // Create the label window exactly as originally: visible at top-left of monitor.
+    // This keeps DWM stable (prevents frame drops during camera rotation).
+    // Make it permanent by forcing labelAlways_ = true.
+    label_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT, wc.lpszClassName,
+                             text, WS_POPUP, mi.rcMonitor.left + 16, mi.rcMonitor.top + 16, 400, 40, nullptr, nullptr, inst_, nullptr);
     if (!label_)
         return;
     SetLayeredWindowAttributes(label_, 0, 215, LWA_ALPHA);
     ShowWindow(label_, SW_SHOWNOACTIVATE);
-    // Always keep the label window alive (even after timeout) to maintain DWM stability.
-    // The text becomes invisible (background color) but the window remains composed by DWM.
+    // Force permanent label - never destroy, never hide. This maintains DWM stability forever.
     labelAlways_ = true;
     labelUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(st_.labelSeconds);
 }
@@ -1570,16 +1564,11 @@ void Host::UpdateLabel()
         }
     }
     // After labelUntil_, make text invisible but keep window alive
-    if (label_ && g_labelTextVisible && std::chrono::steady_clock::now() > labelUntil_)
-    {
-        g_labelTextVisible = false;
-        InvalidateRect(label_, nullptr, TRUE);
-    }
     if (!label_)
         return;
-    // labelAlways_ is forced true, so the label never times out.
-    // The text visibility is controlled by g_labelTextVisible (set to false after labelUntil_).
-    // Keep the tiny off-screen label at topmost to maintain DWM stability.
+    // labelAlways_ is forced true - label stays visible forever.
+    // This keeps DWM stable (prevents frame drops during camera rotation).
+    // stay above the overlay
     SetWindowPos(label_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
