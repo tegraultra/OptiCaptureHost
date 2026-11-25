@@ -715,6 +715,25 @@ HICON MakeAppIcon(int px)
     return ic;
 }
 
+bool FileExists(const std::wstring& f)
+{
+    return GetFileAttributesW(f.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+bool IsGameReshadeInstalled(const std::wstring& gameExePath)
+{
+    if (gameExePath.empty())
+        return false;
+    const size_t slash = gameExePath.find_last_of(L"\\/");
+    if (slash == std::wstring::npos)
+        return false;
+    const std::wstring gameDir = gameExePath.substr(0, slash + 1);
+    const std::wstring f1 = gameDir + L"OptiCapture.ini";
+    const std::wstring f2 = gameDir + L"OptiCaptureDepth.addon64";
+    const std::wstring f3 = gameDir + L"reshade-shaders\\Shaders\\OptiCaptureDepth.fx";
+    return FileExists(f1) && FileExists(f2) && FileExists(f3);
+}
+
 bool IsProcessRunningByExe(const std::wstring& exeName)
 {
     if (exeName.empty())
@@ -793,7 +812,7 @@ std::wstring RtssDir()
     return dir;
 }
 
-bool (GetFileAttributesW((const std::wstring& f).c_str()) != INVALID_FILE_ATTRIBUTES)
+bool FileExists(const std::wstring& f)
 {
     return GetFileAttributesW(f.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
@@ -825,7 +844,7 @@ std::wstring RtssInstallDir()
             continue;
         if (d.back() != L'\\' && d.back() != L'/')
             d += L'\\';
-        if ((GetFileAttributesW((d + L"RTSSHooks64.dll").c_str()) != INVALID_FILE_ATTRIBUTES))
+        if (FileExists(d + L"RTSSHooks64.dll"))
             return d;
     }
     return std::wstring();
@@ -3982,14 +4001,27 @@ void App::DrawDepthPanel(gp::Graphics& g)
     }
     {
         const bool pick = selected_ >= 0 && selected_ < static_cast<int>(games_.size()) && !Running();
+        const bool installed = pick && IsGameReshadeInstalled(games_[selected_].fullExe);
         const gp::RectF instBtn = R(18, 734, 234, 38);
         const bool hotI = hover_ == kIdDepthInstall && pick;
-        if (pick)
+        if (installed)
+        {
+            FillRound(g, instBtn, S(9), col::Alpha(col::Green(), hotI ? 70 : 42));
+            StrokeRound(g, instBtn, S(9), hotI ? col::White() : col::Green(), max(1.0f, S(1.5f)));
+            Text(g, L"Installed", *f_.chip, instBtn, col::Green(), 1);
+        }
+        else if (pick)
+        {
             FillRound(g, instBtn, S(9), hotI ? col::Accent2() : col::Accent());
+            StrokeRound(g, instBtn, S(9), hotI ? col::Accent2() : col::Line(), max(1.0f, S(1)));
+            Text(g, L"Install ReShade files", *f_.chip, instBtn, col::White(), 1);
+        }
         else
+        {
             FillRound(g, instBtn, S(9), col::Row());
-        StrokeRound(g, instBtn, S(9), hotI ? col::Accent2() : col::Line(), max(1.0f, S(1)));
-        Text(g, L"Install ReShade files", *f_.chip, instBtn, pick ? col::White() : col::Muted(), 1);
+            StrokeRound(g, instBtn, S(9), hotI ? col::Accent2() : col::Line(), max(1.0f, S(1)));
+            Text(g, L"Install ReShade files", *f_.chip, instBtn, col::Muted(), 1);
+        }
         if (pick)
             AddHit(instBtn, kIdDepthInstall);
     }
