@@ -1531,8 +1531,11 @@ void Host::CreateLabel()
     static const wchar_t* const lvNames[] = { L"Quality", L"Balanced", L"Performance", L"Native" };
     swprintf(text, 64, L"%u to %u  (%s \u00B7 %s)", height_, outH_, names[(upMethod_ >= 0 && upMethod_ <= 5) ? upMethod_ : 0],
              lvNames[(st_.upscaleLevel >= 0 && st_.upscaleLevel <= 3) ? st_.upscaleLevel : 0]);
-    label_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT, wc.lpszClassName,
-                             text, WS_POPUP, mi.rcMonitor.left + 16, mi.rcMonitor.top + 16, 400, 40, nullptr, nullptr, inst_, nullptr);
+    // Create a tiny 1x1 transparent TOPMOST window at off-screen position (0,0).
+    // This keeps DWM composing it without interfering with overlay click-through.
+    // Not a child - avoids any focus/click issues with the overlay.
+    label_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, wc.lpszClassName,
+                             L"", WS_POPUP, -1000, -1000, 1, 1, nullptr, nullptr, inst_, nullptr);
     if (!label_)
         return;
     SetLayeredWindowAttributes(label_, 0, 215, LWA_ALPHA);
@@ -1576,7 +1579,7 @@ void Host::UpdateLabel()
         return;
     // labelAlways_ is forced true, so the label never times out.
     // The text visibility is controlled by g_labelTextVisible (set to false after labelUntil_).
-    // stay above the overlay
+    // Keep the tiny off-screen label at topmost to maintain DWM stability.
     SetWindowPos(label_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
