@@ -240,6 +240,9 @@ struct MouseRemapState
     double virtX = 0.0; // where the user sees the pointer (overlay / screen coordinates)
     double virtY = 0.0;
     POINT lastSet{};    // where the real cursor was put for the game
+    ULONGLONG warpStart = 0; // the game moving the cursor by itself (mouse look with a visible pointer)
+    int warpCount = 0;
+    ULONGLONG lookUntil = 0;
 };
 
 MouseRemapState g_mouseRemap;
@@ -278,6 +281,9 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
     if (nCode == HC_ACTION && g_mouseRemap.active.load(std::memory_order_acquire))
     {
         auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
+        // While a button is held (drag, right-button look) the game works with the real cursor as it is: no remap.
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_MBUTTONDOWN)
+            g_mouseRemap.remap.store(false, std::memory_order_release);
         if (ms && !(ms->flags & LLMHF_INJECTED) && wParam == WM_MOUSEMOVE && g_mouseRemap.remap.load(std::memory_order_acquire) &&
             g_mouseRemap.virtInit)
         {
@@ -3241,11 +3247,31 @@ void Host::UpdateOutputScalingMouse(std::chrono::steady_clock::time_point now)
     {
         POINT cur{};
         GetCursorPos(&cur);
-        if (!g_mouseRemap.virtInit || cur.x != g_mouseRemap.lastSet.x || cur.y != g_mouseRemap.lastSet.y)
-            MapGameToVirtual(g_mouseRemap, cur); // first time, or the game moved the cursor itself
+        const ULONGLONG t = GetTickCount64();
+        const bool btnDown = ((GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON) | GetAsyncKeyState(VK_MBUTTON)) & 0x8000) != 0;
+        const bool warped = g_mouseRemap.virtInit && (cur.x != g_mouseRemap.lastSet.x || cur.y != g_mouseRemap.lastSet.y);
+        if (warped && !btnDown)
+        {
+            // A game that keeps putting the cursor back (mouse look) would make the pointer jump: after a few warps in a
+            // short time, leave the cursor to the game for a moment.
+            if (t - g_mouseRemap.warpStart > 250)
+            {
+                g_mouseRemap.warpStart = t;
+                g_mouseRemap.warpCount = 0;
+            }
+            if (++g_mouseRemap.warpCount >= 3)
+                g_mouseRemap.lookUntil = t + 400;
+        }
+        const bool look = t < g_mouseRemap.lookUntil;
+        // Held button or mouse look: the real cursor is the truth, the drawn pointer just follows it.
+        if (btnDown || look || warped || !g_mouseRemap.virtInit)
+            MapGameToVirtual(g_mouseRemap, cur);
         BlankSystemCursors(inst_);
-        g_mouseRemap.remap.store(true, std::memory_order_release);
-        CursorWindowUpdate(inst_, overlay_, ci.hCursor, g_mouseRemap.virtX, g_mouseRemap.virtY);
+        g_mouseRemap.remap.store(!btnDown && !look, std::memory_order_release);
+        if (look)
+            CursorWindowHide();
+        else
+            CursorWindowUpdate(inst_, overlay_, ci.hCursor, g_mouseRemap.virtX, g_mouseRemap.virtY);
     }
     else
     {
