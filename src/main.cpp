@@ -217,12 +217,11 @@ void BoostProcess(int level)
 
 // ---------------------------------------------------------------------------------------------------------------
 // ---------------------------------------------------------------------------------------------------------------
-// Output-scaling mouse click mapping, centering & ClipCursor unlock
+// Output-scaling mouse click mapping & ClipCursor unlock (no jump on click)
 // ---------------------------------------------------------------------------------------------------------------
-// When output scaling downscales the game window (gameW x gameH) and stretches it across the full overlay
-// (outW x outH), clicking on the full-screen image happens at screen coordinates (0..outW, 0..outH) while the
-// game's client area is smaller. We unlock small ClipCursor() rectangles while the game is focused (outside
-// interactive mode) and map button press/release coordinates proportionally into the game's client area.
+// When output scaling downscales the game window and stretches it across the overlay, games may clip ClipCursor()
+// to their small window. We unlock small ClipCursor() rectangles while the game is focused (outside interactive mode)
+// and avoid calling SetCursorPos() on button down/up so the cursor never jumps on click.
 struct MouseRemapState
 {
     std::atomic<bool> active{ false };
@@ -259,33 +258,10 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
                 return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
             }
 
+            // Do not call SetCursorPos() on button down/up so the cursor never jumps on click.
             if (IsClickButtonMessage(wParam))
             {
-                const RECT gr = g_mouseRemap.gameClientScreen;
-                const RECT ov = g_mouseRemap.overlayScreen;
-                const UINT gw = g_mouseRemap.gameW;
-                const UINT gh = g_mouseRemap.gameH;
-                const UINT ow = g_mouseRemap.outW;
-                const UINT oh = g_mouseRemap.outH;
-
-                if (gw > 1 && gh > 1 && ow > gw && oh > gh)
-                {
-                    const double normX = std::clamp(
-                        (static_cast<double>(ms->pt.x) - static_cast<double>(ov.left)) / static_cast<double>(ow - 1),
-                        0.0, 1.0);
-                    const double normY = std::clamp(
-                        (static_cast<double>(ms->pt.y) - static_cast<double>(ov.top)) / static_cast<double>(oh - 1),
-                        0.0, 1.0);
-
-                    const LONG mappedX = gr.left + static_cast<LONG>(std::lround(normX * static_cast<double>(gw - 1)));
-                    const LONG mappedY = gr.top  + static_cast<LONG>(std::lround(normY * static_cast<double>(gh - 1)));
-
-                    if (mappedX != ms->pt.x || mappedY != ms->pt.y)
-                    {
-                        g_mouseRemap.selfMove.store(true, std::memory_order_release);
-                        SetCursorPos(mappedX, mappedY);
-                    }
-                }
+                return CallNextHookEx(g_mouseRemap.hook, nCode, wParam, lParam);
             }
         }
     }
@@ -3016,36 +2992,13 @@ void Host::ToggleInteractive()
 
 void Host::KeepGameVisible(std::chrono::steady_clock::time_point now)
 {
-    if (now - keepGameCheck_ < std::chrono::milliseconds(120))
+    if (now >= keepGameUntil_ || now - keepGameCheck_ < std::chrono::milliseconds(80))
         return;
     keepGameCheck_ = now;
-
-    if (now < keepGameUntil_ && target_ && IsWindow(target_) && IsIconic(target_))
+    if (target_ && IsWindow(target_) && IsIconic(target_))
     {
         ShowWindow(target_, SW_SHOWNOACTIVATE); // back on screen, the focus stays where the shortcut put it
         Log("The game minimised itself when it lost the focus: put back on screen");
-    }
-
-    // Center the game window on its monitor when downscaled output scaling is active
-    if (upOn_ && outW_ > width_ && outH_ > height_ && target_ && IsWindow(target_) && !IsIconic(target_) && !IsZoomed(target_))
-    {
-        MONITORINFO mi{};
-        mi.cbSize = sizeof(mi);
-        RECT wr{};
-        if (GetMonitorInfoW(MonitorFromWindow(target_, MONITOR_DEFAULTTONEAREST), &mi) && GetWindowRect(target_, &wr))
-        {
-            const int ww = wr.right - wr.left;
-            const int wh = wr.bottom - wr.top;
-            const int mw = mi.rcMonitor.right - mi.rcMonitor.left;
-            const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
-            if (ww > 0 && wh > 0 && ww < mw && wh < mh)
-            {
-                const int wantX = mi.rcMonitor.left + (mw - ww) / 2;
-                const int wantY = mi.rcMonitor.top + (mh - wh) / 2;
-                if (std::abs(wr.left - wantX) > 2 || std::abs(wr.top - wantY) > 2)
-                    SetWindowPos(target_, nullptr, wantX, wantY, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            }
-        }
     }
 }
 
